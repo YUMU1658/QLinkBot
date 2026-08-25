@@ -156,7 +156,8 @@ class Sender:
         merge_body = {"file_type": FILE_TYPE_VIDEO,
                       "upload_id": upload_id,
                       "srv_send_msg": False}
-        result = await self._files_call(endpoint_id, is_group, "", merge_body)
+        result = await self._files_call(endpoint_id, is_group, "/files",
+                                        merge_body)
         file_info = result.get("file_info")
         if not file_info:
             raise QQApiError(0, f"上传合并未返回 file_info: {result}")
@@ -164,30 +165,28 @@ class Sender:
 
     async def _files_call(self, endpoint_id: str, is_group: bool,
                           suffix: str, body: dict) -> dict:
+        # suffix 为完整后缀："/files"（合并/URL上传）、
+        # "/upload_prepare"、"/upload_part_finish"
         path = (f"/v2/groups/{endpoint_id}" if is_group
-                else f"/v2/users/{endpoint_id}") + "/files" + suffix
-        token = await self._api._tokens.get(self._api.session)
-        headers = {"Authorization": f"QQBot {token}",
-                   "Content-Type": "application/json"}
-        async with self._api.session.post(
-                self._api.API_BASE + path, json=body, headers=headers,
-                timeout=aiohttp.ClientTimeout(total=30)) as resp:
-            data = await resp.json(content_type=None)
-            if resp.status >= 400:
-                raise QQApiError(resp.status, data)
-            return data or {}
+                else f"/v2/users/{endpoint_id}") + suffix
+        return await self._api.request("POST", path, body)
 
     async def _put_parts(self, parts: list[dict], data: bytes,
                          block_size: int, concurrency: int) -> None:
         sem = asyncio.Semaphore(max(concurrency, 1))
 
-        async def put_one(part: dict) -> None:
+        # 按 index 排序并用累计偏移切分，兼容非均匀 block_size
+        ordered = sorted(parts, key=lambda p: int(p.get("index") or 0))
+        chunks: list[tuple[int, bytes]] = []
+        offset = 0
+        for part in ordered:
+            size = int(part.get("block_size") or block_size)
+            chunk = data[offset:offset + size] if size else b""
+            chunks.append((int(part.get("index") or 0), chunk))
+            offset += len(chunk)
+
+        async def put_one(index: int, url: str, chunk: bytes) -> None:
             async with sem:
-                url = part.get("presigned_url")
-                index = int(part.get("index") or 0)
-                size = int(part.get("block_size") or block_size)
-                offset = index * size if size else 0
-                chunk = data[offset:offset + size] if size else data[index:]
                 for attempt in range(3):
                     try:
                         async with self._api.session.put(
@@ -202,4 +201,6 @@ class Sender:
                     await asyncio.sleep(1.5 * (attempt + 1))
                 raise QQApiError(0, f"分片 {index} 上传失败")
 
-        await asyncio.gather(*(put_one(p) for p in parts))
+        await asyncio.gather(
+            *(put_one(idx, part.get("presigned_url"), chunk)
+              for (idx, chunk), part in zip(chunks, ordered)))

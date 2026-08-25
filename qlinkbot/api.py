@@ -18,9 +18,11 @@ RETRY_STATUS = {429, 500, 502, 503, 504}
 
 
 class QQApiError(Exception):
-    def __init__(self, status: int, data: Any) -> None:
-        super().__init__(f"HTTP {status}: {data}")
+    def __init__(self, status: int, data: Any,
+                 path: str | None = None) -> None:
+        super().__init__(f"HTTP {status}{f' [{path}]' if path else ''}: {data}")
         self.status = status
+        self.path = path
 
 
 class QQApi:
@@ -45,6 +47,12 @@ class QQApi:
     async def _request(self, method: str, path: str,
                        json_body: dict | None = None,
                        retry: int = 2) -> Any:
+        return await self.request(method, path, json_body, retry)
+
+    async def request(self, method: str, path: str,
+                      json_body: dict | None = None,
+                      retry: int = 2) -> Any:
+        """公开的通用请求入口：自动携带 token，401 强刷重试，429/5xx 退避。"""
         url = API_BASE + path
         last_exc: Exception | None = None
         for attempt in range(retry + 1):
@@ -62,7 +70,7 @@ class QQApi:
                         await self._tokens.invalidate_and_get(self.session)
                         continue
                     if resp.status >= 400:
-                        exc = QQApiError(resp.status, data)
+                        exc = QQApiError(resp.status, data, path)
                         if resp.status in RETRY_STATUS and attempt < retry:
                             log.warning("%s %s 返回 %s，准备重试: %s",
                                         method, path, resp.status, data)
