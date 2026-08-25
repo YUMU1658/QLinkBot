@@ -1,0 +1,205 @@
+"""发送实现：Markdown 卡片、富媒体分片上传、被动回复。"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import logging
+from pathlib import Path
+
+import aiohttp
+
+from .api import QQApi, QQApiError
+from .bilibili import VideoMeta
+from .events import InboundMessage
+
+log = logging.getLogger(__name__)
+
+FILE_TYPE_VIDEO = 2
+
+CARD_TEMPLATE = """![视频封面]({cover})
+
+### 🎬 {title}
+
+👤 **UP：** {uploader}
+
+▶ {views}　💬 {danmaku}　👍 {likes}
+⭐ {favorites}　🪙 {coins}　💭 {comments}
+
+> {description}
+
+🔗 **原视频：** https://www.bilibili.com/video/{bvid}"""
+
+DESC_MAX = 100
+
+
+def _fmt_count(n: int) -> str:
+    if n >= 100_000_000:
+        return f"{n / 100_000_000:.1f}亿"
+    if n >= 10_000:
+        return f"{n / 10_000:.1f}万"
+    return str(n)
+
+
+def _truncate_desc(text: str) -> str:
+    text = " ".join(text.split())
+    if len(text) > DESC_MAX:
+        return text[:DESC_MAX] + "…"
+    return text or "（无简介）"
+
+
+def build_markdown(meta: VideoMeta, cover_url: str) -> str:
+    return CARD_TEMPLATE.format(
+        cover=cover_url,
+        title=meta.title.replace("[", "［").replace("]", "］"),
+        uploader=meta.uploader,
+        views=_fmt_count(meta.views),
+        danmaku=_fmt_count(meta.danmaku),
+        likes=_fmt_count(meta.likes),
+        favorites=_fmt_count(meta.favorites),
+        coins=_fmt_count(meta.coins),
+        comments=_fmt_count(meta.comments),
+        description=_truncate_desc(meta.description).replace("\n", " "),
+        bvid=meta.bvid,
+    )
+
+
+class Sender:
+    def __init__(self, api: QQApi) -> None:
+        self._api = api
+
+    async def reply_markdown(self, msg: InboundMessage, content: str,
+                             seq: int) -> dict:
+        body = self._base_body(seq)
+        body["msg_type"] = 2
+        body["markdown"] = {"content": content}
+        return await self._send(msg, body)
+
+    async def reply_text(self, msg: InboundMessage, content: str,
+                         seq: int) -> dict:
+        body = self._base_body(seq)
+        body["msg_type"] = 0
+        body["content"] = content
+        return await self._send(msg, body)
+
+    async def send_video(self, msg: InboundMessage, file_path: Path,
+                         seq: int, file_name: str | None = None) -> dict:
+        """上传本地视频并作为被动回复发送。"""
+        if msg.is_group:
+            endpoint_id = msg.group_openid
+        else:
+            endpoint_id = msg.user_openid
+        media = await self._upload_media(endpoint_id, msg.is_group,
+                                         file_path, file_name)
+        body = self._base_body(seq)
+        body["msg_type"] = 7
+        body["media"] = media
+        return await self._send(msg, body)
+
+    @staticmethod
+    def _base_body(seq: int) -> dict:
+        # 被动回复：msg_seq 随多条回复递增（卡片=1，视频=2）
+        return {"msg_id": "", "msg_seq": seq}
+
+    def _with_msg_id(self, msg: InboundMessage, body: dict) -> dict:
+        if msg.message_id:
+            body["msg_id"] = msg.message_id
+        else:
+            body.pop("msg_id", None)
+        return body
+
+    async def _send(self, msg: InboundMessage, body: dict) -> dict:
+        self._with_msg_id(msg, body)
+        if msg.is_group:
+            return await self._api.send_group_message(msg.group_openid, body)
+        return await self._api.send_user_message(msg.user_openid, body)
+
+    # ---- 富媒体分片上传 ----
+
+    async def _upload_media(self, endpoint_id: str, is_group: bool,
+                            file_path: Path,
+                            file_name: str | None) -> dict:
+        data = file_path.read_bytes()
+        size = len(data)
+        name = file_name or file_path.name or "video.mp4"
+        md5 = hashlib.md5(data).hexdigest()
+        sha1 = hashlib.sha1(data).hexdigest()
+        md5_10m = hashlib.md5(data[:10_002_432]).hexdigest()
+
+        prepare_body = {
+            "file_type": FILE_TYPE_VIDEO,
+            "file_size": str(size),
+            "file_name": name,
+            "md5": md5,
+            "sha1": sha1,
+            "md5_10m": md5_10m,
+        }
+        prepare = await self._files_call(endpoint_id, is_group,
+                                         "/upload_prepare", prepare_body)
+
+        upload_id = prepare.get("upload_id")
+        parts = prepare.get("parts") or []
+        block_size = int(prepare.get("block_size") or 0)
+        if not upload_id or not parts:
+            raise QQApiError(0, f"upload_prepare 响应异常: {prepare}")
+
+        concurrency = int((prepare.get("upload_config") or {})
+                          .get("concurrency") or 3)
+        await self._put_parts(parts, data, block_size, concurrency)
+
+        for part in parts:
+            finish_body = {"upload_id": upload_id,
+                           "part_index": part.get("index")}
+            await self._files_call(endpoint_id, is_group,
+                                   "/upload_part_finish", finish_body)
+
+        merge_body = {"file_type": FILE_TYPE_VIDEO,
+                      "upload_id": upload_id,
+                      "srv_send_msg": False}
+        result = await self._files_call(endpoint_id, is_group, "", merge_body)
+        file_info = result.get("file_info")
+        if not file_info:
+            raise QQApiError(0, f"上传合并未返回 file_info: {result}")
+        return {"file_info": file_info}
+
+    async def _files_call(self, endpoint_id: str, is_group: bool,
+                          suffix: str, body: dict) -> dict:
+        path = (f"/v2/groups/{endpoint_id}" if is_group
+                else f"/v2/users/{endpoint_id}") + "/files" + suffix
+        token = await self._api._tokens.get(self._api.session)
+        headers = {"Authorization": f"QQBot {token}",
+                   "Content-Type": "application/json"}
+        async with self._api.session.post(
+                self._api.API_BASE + path, json=body, headers=headers,
+                timeout=aiohttp.ClientTimeout(total=30)) as resp:
+            data = await resp.json(content_type=None)
+            if resp.status >= 400:
+                raise QQApiError(resp.status, data)
+            return data or {}
+
+    async def _put_parts(self, parts: list[dict], data: bytes,
+                         block_size: int, concurrency: int) -> None:
+        sem = asyncio.Semaphore(max(concurrency, 1))
+
+        async def put_one(part: dict) -> None:
+            async with sem:
+                url = part.get("presigned_url")
+                index = int(part.get("index") or 0)
+                size = int(part.get("block_size") or block_size)
+                offset = index * size if size else 0
+                chunk = data[offset:offset + size] if size else data[index:]
+                for attempt in range(3):
+                    try:
+                        async with self._api.session.put(
+                                url, data=chunk,
+                                timeout=aiohttp.ClientTimeout(total=60)) as resp:
+                            resp.release()
+                            if resp.status < 400:
+                                return
+                            log.warning("分片 %d PUT 返回 %d", index, resp.status)
+                    except (aiohttp.ClientError, TimeoutError) as e:
+                        log.warning("分片 %d PUT 异常: %s", index, e)
+                    await asyncio.sleep(1.5 * (attempt + 1))
+                raise QQApiError(0, f"分片 {index} 上传失败")
+
+        await asyncio.gather(*(put_one(p) for p in parts))

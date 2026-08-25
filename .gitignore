@@ -1,0 +1,5 @@
+qlinkbot/__pycache__/
+config.toml
+downloads/
+*.pyc
+.env

@@ -1,0 +1,20 @@
+[bot]
+appid = ""
+secret = ""
+
+[limits]
+max_file_size_mb = 30
+parse_timeout_seconds = 300
+rate_limit_count = 10
+rate_limit_window_seconds = 60
+
+[cache]
+file_ttl_seconds = 600
+metadata_ttl_seconds = 1800
+duplicate_window_seconds = 600
+
+[behavior]
+report_errors = false
+
+[platforms.bilibili]
+enabled = true
