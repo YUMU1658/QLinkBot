@@ -14,7 +14,7 @@ from .caches import DuplicateLimiter, FileCache, MetadataCache, MessageDedup, Ra
 from .config import Config
 from .events import InboundMessage
 from .extract import extract_target, normalize_target
-from .sender import Sender, build_markdown
+from .sender import Sender, build_text_reply
 
 log = logging.getLogger(__name__)
 
@@ -28,6 +28,9 @@ class Pipeline:
         self._parser = BilibiliParser(api.session)
         self._downloads_dir = downloads_dir
         self.file_cache = FileCache(cfg.cache.file_ttl_seconds)
+        # 封面文件缓存与视频文件缓存共用同一 TTL 配置（cache.file_ttl_seconds）
+        self.cover_cache = FileCache(cfg.cache.file_ttl_seconds)
+        self._covers_dir = downloads_dir / "covers"
         self.meta_cache = MetadataCache(cfg.cache.metadata_ttl_seconds)
         self.duplicate = DuplicateLimiter(cfg.cache.duplicate_window_seconds)
         self.rate_limiter = RateLimiter(cfg.limits.rate_limit_count,
@@ -70,11 +73,11 @@ class Pipeline:
 
         # 已下载文件缓存命中：直接重发，不再解析、不计次
         cached_file = self.file_cache.get(video_key)
-        if cached_file is not None:
+        meta = self._load_meta(video_key)
+        if cached_file is not None and meta is not None:
             log.info("[%s] 命中文件缓存 %s", msg.session_key, video_key)
-            meta = self._load_meta(video_key)
             try:
-                await self._send_result(msg, meta, cached_file)
+                await self._send_result(msg, meta, cached_file, video_key)
             except QQApiError as e:
                 log.warning("缓存文件重发失败: %s", e)
                 await self._maybe_report(msg, "failed")
@@ -132,7 +135,7 @@ class Pipeline:
             raise TooLargeError(
                 f"实际 {actual_size / 1024 / 1024:.1f}MB 超过限制")
 
-        await self._send_result(msg, meta, file_path)
+        await self._send_result(msg, meta, file_path, video_key)
 
         # 全部成功：记录各类缓存与计数
         self.file_cache.put(video_key, file_path)
@@ -147,10 +150,63 @@ class Pipeline:
         from .bilibili import VideoMeta
         return VideoMeta.from_cache(data)
 
-    async def _send_result(self, msg: InboundMessage, meta, file_path: Path) -> None:
-        card = build_markdown(meta, meta.cover)
-        await self._sender.reply_markdown(msg, card, seq=1)
-        await self._sender.send_video(msg, file_path, seq=2)
+    async def _ensure_cover(self, meta, video_key: str) -> Path | None:
+        """取封面本地文件；未缓存则下载。失败仅告警，不阻断主流程。"""
+        cached = self.cover_cache.get(video_key)
+        if cached is not None:
+            return cached
+        if not meta.cover:
+            return None
+        try:
+            path = await self._parser.download_cover(
+                meta.cover, self._covers_dir, video_key)
+        except Exception as e:
+            log.warning("封面获取失败 %s: %s", video_key, e)
+            return None
+        self.cover_cache.put(video_key, path)
+        return path
+
+    @staticmethod
+    def _at_prefix(msg: InboundMessage) -> str:
+        """@ 机器人消息（对应平台"仅@/@最近N条"范围）回复需带上 @用户；
+        全量群消息与私聊不加。"""
+        if msg.event_type == "GROUP_AT_MESSAGE_CREATE":
+            return f'<qqbot-at-user id="{msg.user_openid}" />\n'
+        return ""
+
+    async def _send_result(self, msg: InboundMessage, meta,
+                           file_path: Path, video_key: str) -> None:
+        text = build_text_reply(meta)
+        prefix = self._at_prefix(msg)
+        if prefix:
+            text = prefix + text
+
+        seq_box = [0]
+
+        def next_seq() -> int:
+            seq_box[0] += 1
+            return seq_box[0]
+
+        cover = await self._ensure_cover(meta, video_key)
+
+        combined_done = False
+        if cover is not None and self._cfg.behavior.media_with_text:
+            # 优先图文同条发送；平台拒绝时自动拆为两条
+            try:
+                await self._sender.reply_cover_with_text(
+                    msg, cover, text, next_seq())
+                combined_done = True
+            except QQApiError as e:
+                log.warning("图文同条发送失败，降级为分开两条: %s", e)
+        if not combined_done:
+            await self._sender.reply_text(msg, text, next_seq())
+            if cover is not None:
+                try:
+                    await self._sender.send_cover(msg, cover, next_seq())
+                except QQApiError as e:
+                    log.warning("封面发送失败（继续发送视频）: %s", e)
+
+        await self._sender.send_video(msg, file_path, next_seq())
 
     async def _maybe_report(self, msg: InboundMessage,
                             kind: str) -> None:
@@ -166,6 +222,7 @@ class Pipeline:
         if not text:
             return
         try:
-            await self._sender.reply_text(msg, text, seq=1)
+            # 独立高位 seq，避免与正常链路已占用的低序号重复组合被平台去重拒发
+            await self._sender.reply_text(msg, text, seq=9)
         except Exception as e:
             log.debug("错误提示发送失败（可能超出被动窗口）: %s", e)

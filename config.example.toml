@@ -9,12 +9,13 @@ rate_limit_count = 10
 rate_limit_window_seconds = 60
 
 [cache]
-file_ttl_seconds = 600
+file_ttl_seconds = 600   # 视频/封面文件的缓存时长（两者共用）
 metadata_ttl_seconds = 1800
 duplicate_window_seconds = 600
 
 [behavior]
-report_errors = false
+report_errors = false     # 解析失败/超时/重复时是否回复错误提示
+media_with_text = true    # 尝试封面+文字同条发送；平台不支持时自动拆为两条
 
 [platforms.bilibili]
 enabled = true

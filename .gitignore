@@ -3,3 +3,4 @@ config.toml
 downloads/
 *.pyc
 .env
+.ZCode/

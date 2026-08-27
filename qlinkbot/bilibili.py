@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import shutil
 import sys
 from contextlib import suppress
 from dataclasses import dataclass, fields
 from pathlib import Path
+from urllib.parse import urlparse
 
 import aiohttp
 
@@ -108,10 +110,6 @@ class TooLargeError(ParseError):
     """文件超过大小限制。"""
 
 
-class TooLargeError(ParseError):
-    pass
-
-
 def _has_ffmpeg() -> bool:
     return shutil.which("ffmpeg") is not None
 
@@ -192,6 +190,37 @@ class BilibiliParser:
             raise ParseError("未能取得视频 ID（可能不是普通视频内容）")
         await _enrich_stats(self._session, meta)
         return meta
+
+    async def download_cover(self, url: str, output_dir: Path,
+                             key: str) -> Path:
+        """下载视频封面到 output_dir/<key>.<ext>，返回本地路径。
+
+        B 站图床要求带 Referer；失败抛 ParseError，由调用方决定降级。
+        """
+        if self._session is None:
+            raise ParseError("无可用 HTTP 会话下载封面")
+        ext = Path(urlparse(url).path).suffix.lower()
+        if ext not in (".jpg", ".jpeg", ".png", ".webp", ".gif"):
+            ext = ".jpg"
+        # key 形如 "bvid:bvxx"（可能含冒号），替换为安全的文件名字符
+        name = re.sub(r"[^A-Za-z0-9_-]", "_", key) or "cover"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        dest = output_dir / f"{name}{ext}"
+        try:
+            async with self._session.get(
+                    url,
+                    headers={"User-Agent": _USER_AGENT,
+                             "Referer": "https://www.bilibili.com/"},
+                    timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                if resp.status != 200:
+                    raise ParseError(f"封面下载 HTTP {resp.status}: {url}")
+                data = await resp.read()
+        except (aiohttp.ClientError, TimeoutError) as e:
+            raise ParseError(f"封面下载失败: {e}") from e
+        if not data:
+            raise ParseError("封面内容为空")
+        dest.write_bytes(data)
+        return dest
 
     async def download(self, url: str, output_dir: Path,
                        timeout: int) -> Path:

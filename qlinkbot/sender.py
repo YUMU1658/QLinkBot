@@ -1,4 +1,4 @@
-"""发送实现：Markdown 卡片、富媒体分片上传、被动回复。"""
+"""发送实现：纯文本回复、封面图片/视频富媒体分片上传、被动回复。"""
 
 from __future__ import annotations
 
@@ -15,20 +15,18 @@ from .events import InboundMessage
 
 log = logging.getLogger(__name__)
 
+FILE_TYPE_IMAGE = 1
 FILE_TYPE_VIDEO = 2
 
-CARD_TEMPLATE = """![视频封面]({cover})
+REPLY_TEMPLATE = """{title}
+UP：{uploader}
 
-### 🎬 {title}
+播放 {views}　弹幕 {danmaku}　点赞 {likes}
+收藏 {favorites}　投币 {coins}　评论 {comments}
 
-👤 **UP：** {uploader}
+{description}
 
-▶ {views}　💬 {danmaku}　👍 {likes}
-⭐ {favorites}　🪙 {coins}　💭 {comments}
-
-> {description}
-
-🔗 **原视频：** https://www.bilibili.com/video/{bvid}"""
+原视频：https://www.bilibili.com/video/{bvid}"""
 
 DESC_MAX = 100
 
@@ -48,10 +46,9 @@ def _truncate_desc(text: str) -> str:
     return text or "（无简介）"
 
 
-def build_markdown(meta: VideoMeta, cover_url: str) -> str:
-    return CARD_TEMPLATE.format(
-        cover=cover_url,
-        title=meta.title.replace("[", "［").replace("]", "］"),
+def build_text_reply(meta: VideoMeta) -> str:
+    return REPLY_TEMPLATE.format(
+        title=meta.title,
         uploader=meta.uploader,
         views=_fmt_count(meta.views),
         danmaku=_fmt_count(meta.danmaku),
@@ -59,7 +56,7 @@ def build_markdown(meta: VideoMeta, cover_url: str) -> str:
         favorites=_fmt_count(meta.favorites),
         coins=_fmt_count(meta.coins),
         comments=_fmt_count(meta.comments),
-        description=_truncate_desc(meta.description).replace("\n", " "),
+        description=_truncate_desc(meta.description),
         bvid=meta.bvid,
     )
 
@@ -68,13 +65,6 @@ class Sender:
     def __init__(self, api: QQApi) -> None:
         self._api = api
 
-    async def reply_markdown(self, msg: InboundMessage, content: str,
-                             seq: int) -> dict:
-        body = self._base_body(seq)
-        body["msg_type"] = 2
-        body["markdown"] = {"content": content}
-        return await self._send(msg, body)
-
     async def reply_text(self, msg: InboundMessage, content: str,
                          seq: int) -> dict:
         body = self._base_body(seq)
@@ -82,24 +72,49 @@ class Sender:
         body["content"] = content
         return await self._send(msg, body)
 
+    async def send_cover(self, msg: InboundMessage, cover_path: Path,
+                         seq: int) -> dict:
+        """上传本地图片并作为被动回复单独发送。"""
+        media = await self._prepare_media(msg, cover_path, FILE_TYPE_IMAGE)
+        return await self._send_media(msg, media, seq)
+
+    async def reply_cover_with_text(self, msg: InboundMessage,
+                                    cover_path: Path, text: str,
+                                    seq: int) -> dict:
+        """图文同条：media 消息附带 content 文本；平台不支持时由调用方降级。"""
+        media = await self._prepare_media(msg, cover_path, FILE_TYPE_IMAGE)
+        body = self._base_body(seq)
+        body["msg_type"] = 7
+        body["media"] = media
+        body["content"] = text
+        return await self._send(msg, body)
+
     async def send_video(self, msg: InboundMessage, file_path: Path,
                          seq: int, file_name: str | None = None) -> dict:
         """上传本地视频并作为被动回复发送。"""
-        if msg.is_group:
-            endpoint_id = msg.group_openid
-        else:
-            endpoint_id = msg.user_openid
-        media = await self._upload_media(endpoint_id, msg.is_group,
-                                         file_path, file_name)
+        media = await self._prepare_media(msg, file_path, FILE_TYPE_VIDEO,
+                                          file_name)
+        return await self._send_media(msg, media, seq)
+
+    @staticmethod
+    def _base_body(seq: int) -> dict:
+        # 被动回复：msg_seq 随多条回复递增（由调用方统一编号）
+        return {"msg_id": "", "msg_seq": seq}
+
+    async def _prepare_media(self, msg: InboundMessage, file_path: Path,
+                             file_type: int,
+                             file_name: str | None = None) -> dict:
+        endpoint_id = (msg.group_openid if msg.is_group
+                       else msg.user_openid)
+        return await self._upload_media(endpoint_id, msg.is_group,
+                                        file_path, file_type, file_name)
+
+    async def _send_media(self, msg: InboundMessage, media: dict,
+                          seq: int) -> dict:
         body = self._base_body(seq)
         body["msg_type"] = 7
         body["media"] = media
         return await self._send(msg, body)
-
-    @staticmethod
-    def _base_body(seq: int) -> dict:
-        # 被动回复：msg_seq 随多条回复递增（卡片=1，视频=2）
-        return {"msg_id": "", "msg_seq": seq}
 
     def _with_msg_id(self, msg: InboundMessage, body: dict) -> dict:
         if msg.message_id:
@@ -117,17 +132,17 @@ class Sender:
     # ---- 富媒体分片上传 ----
 
     async def _upload_media(self, endpoint_id: str, is_group: bool,
-                            file_path: Path,
+                            file_path: Path, file_type: int,
                             file_name: str | None) -> dict:
         data = file_path.read_bytes()
         size = len(data)
-        name = file_name or file_path.name or "video.mp4"
+        name = file_name or file_path.name or "file"
         md5 = hashlib.md5(data).hexdigest()
         sha1 = hashlib.sha1(data).hexdigest()
         md5_10m = hashlib.md5(data[:10_002_432]).hexdigest()
 
         prepare_body = {
-            "file_type": FILE_TYPE_VIDEO,
+            "file_type": file_type,
             "file_size": str(size),
             "file_name": name,
             "md5": md5,
@@ -153,7 +168,7 @@ class Sender:
             await self._files_call(endpoint_id, is_group,
                                    "/upload_part_finish", finish_body)
 
-        merge_body = {"file_type": FILE_TYPE_VIDEO,
+        merge_body = {"file_type": file_type,
                       "upload_id": upload_id,
                       "srv_send_msg": False}
         result = await self._files_call(endpoint_id, is_group, "/files",

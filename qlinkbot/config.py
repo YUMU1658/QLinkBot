@@ -39,6 +39,8 @@ class CacheConfig:
 @dataclass
 class BehaviorConfig:
     report_errors: bool = False
+    # 尝试将封面与文字合并在一条消息中发送；平台拒绝时自动拆为两条
+    media_with_text: bool = True
 
 
 @dataclass
@@ -87,6 +89,8 @@ def load_config(path: str | Path) -> Config:
     behavior = raw.get("behavior", {})
     if "report_errors" in behavior:
         cfg.behavior.report_errors = bool(behavior["report_errors"])
+    if "media_with_text" in behavior:
+        cfg.behavior.media_with_text = bool(behavior["media_with_text"])
     platforms = raw.get("platforms", {})
     bili = platforms.get("bilibili", {})
     if "enabled" in bili:
