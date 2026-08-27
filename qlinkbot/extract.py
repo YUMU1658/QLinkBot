@@ -14,6 +14,8 @@ from dataclasses import dataclass
 
 import aiohttp
 
+from .bilibili import _USER_AGENT
+
 log = logging.getLogger(__name__)
 
 _BVID = r"BV[0-9A-Za-z]{10}"
@@ -84,22 +86,19 @@ def extract_target(content: str) -> Target | None:
 
 async def expand_short_link(session: aiohttp.ClientSession,
                             url: str) -> str | None:
-    """展开 b23.tv 短链，返回最终 URL。"""
+    """展开 b23.tv 短链，返回最终 URL。
+
+    Location 头可能是相对路径（如 /video/BVxxx/?...），手动逐跳拼接会
+    丢域名；交给 aiohttp 自动跟随重定向，resp.url 即绝对化的最终地址。
+    """
     try:
-        current = url
-        for _ in range(5):
-            async with session.get(current, allow_redirects=False,
-                                   timeout=aiohttp.ClientTimeout(total=_EXPAND_TIMEOUT),
-                                   headers={"User-Agent": "Mozilla/5.0"}) as resp:
-                if resp.status in (301, 302, 303, 307, 308):
-                    loc = resp.headers.get("Location")
-                    if not loc:
-                        return None
-                    current = loc
-                    continue
-                resp.release()
-                return current
-        return None
+        async with session.get(url,
+                               allow_redirects=True,
+                               max_redirects=5,
+                               timeout=aiohttp.ClientTimeout(total=_EXPAND_TIMEOUT),
+                               headers={"User-Agent": _USER_AGENT}) as resp:
+            resp.release()
+            return str(resp.url)
     except (aiohttp.ClientError, TimeoutError) as e:
         log.warning("展开短链 %s 失败: %s", url, e)
         return None
