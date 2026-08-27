@@ -27,6 +27,7 @@ python -m qlinkbot.main
 | `cache.file_ttl_seconds` | 600 | 已下载视频与封面图片的缓存时长（共用） |
 | `cache.metadata_ttl_seconds` | 1800 | 元数据缓存时长 |
 | `cache.duplicate_window_seconds` | 600 | 会话内重复视频限速窗口 |
+| `cache.cleanup_interval_seconds` | 60 | 缓存定时清理间隔，到期后删除过期视频/封面文件及残留；`<=0` 禁用 |
 | `limits.rate_limit_count/window_seconds` | 10 / 60 | 全局解析次数限制 |
 | `behavior.report_errors` | false | 解析失败/超时/重复时是否回复错误提示 |
 | `behavior.media_with_text` | true | 尝试封面+文字同条发送；平台不支持时自动拆为两条 |

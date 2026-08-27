@@ -34,6 +34,8 @@ class CacheConfig:
     file_ttl_seconds: int = 600
     metadata_ttl_seconds: int = 1800
     duplicate_window_seconds: int = 600
+    # 缓存定时清理间隔；<=0 表示禁用
+    cleanup_interval_seconds: int = 60
 
 
 @dataclass
@@ -83,7 +85,7 @@ def load_config(path: str | Path) -> Config:
             setattr(cfg.limits, fld, int(limits[fld]))
     cache = raw.get("cache", {})
     for fld in ("file_ttl_seconds", "metadata_ttl_seconds",
-                "duplicate_window_seconds"):
+                "duplicate_window_seconds", "cleanup_interval_seconds"):
         if fld in cache:
             setattr(cfg.cache, fld, int(cache[fld]))
     behavior = raw.get("behavior", {})

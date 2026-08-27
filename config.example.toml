@@ -12,6 +12,7 @@ rate_limit_window_seconds = 60
 file_ttl_seconds = 600   # 视频/封面文件的缓存时长（两者共用）
 metadata_ttl_seconds = 1800
 duplicate_window_seconds = 600
+cleanup_interval_seconds = 60   # 缓存定时清理间隔，过期文件将被删除；<=0 禁用
 
 [behavior]
 report_errors = false     # 解析失败/超时/重复时是否回复错误提示

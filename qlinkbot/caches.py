@@ -38,12 +38,18 @@ class _TTLMap:
             self._data[key] = (time.monotonic() + self._ttl, item[1])
             self._data.move_to_end(key)
 
-    def cleanup(self) -> list[str]:
+    def cleanup(self) -> list[tuple[str, object]]:
+        """移除并返回全部过期条目的 (键, 值)。"""
         now = time.monotonic()
         expired = [k for k, (exp, _) in self._data.items() if now > exp]
+        out = []
         for k in expired:
-            del self._data[k]
-        return expired
+            out.append((k, self._data.pop(k)[1]))
+        return out
+
+    def live_values(self) -> list:
+        now = time.monotonic()
+        return [v for exp, v in self._data.values() if now <= exp]
 
 
 class FileCache:
@@ -62,6 +68,14 @@ class FileCache:
     def put(self, key: str, path: Path) -> None:
         self._map.set(key, path)
 
+    def purge_expired(self) -> list[Path]:
+        """移除过期条目并返回对应的本地路径，供上层删除文件。"""
+        return [v for _, v in self._map.cleanup() if v is not None]
+
+    def live_paths(self) -> list[Path]:
+        """当前未过期的全部缓存路径。"""
+        return [p for p in self._map.live_values() if p is not None]
+
     def refresh(self, key: str) -> None:
         self._map.touch(key)
 
@@ -77,6 +91,9 @@ class MetadataCache:
 
     def put(self, key: str, data: dict) -> None:
         self._map.set(key, data)
+
+    def purge_expired(self) -> None:
+        self._map.cleanup()
 
 
 class DuplicateLimiter:
@@ -101,6 +118,19 @@ class DuplicateLimiter:
         if mark:
             self._seen.setdefault(session_key, {})[video_key] = now
         return False
+
+    def purge_expired(self) -> None:
+        """清扫所有会话中窗口外的记录，并删除空的会话条目。"""
+        now = time.monotonic()
+        empty = []
+        for session_key, seen in self._seen.items():
+            expired = [k for k, ts in seen.items() if now - ts > self._window]
+            for k in expired:
+                del seen[k]
+            if not seen:
+                empty.append(session_key)
+        for session_key in empty:
+            del self._seen[session_key]
 
 
 class RateLimiter:

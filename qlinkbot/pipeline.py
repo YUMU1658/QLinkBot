@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from pathlib import Path
 
 import aiohttp
@@ -39,13 +40,87 @@ class Pipeline:
         # 限制并发解析任务，防止突发消息拖垮机器
         self._parse_sem = asyncio.Semaphore(3)
         self._session: aiohttp.ClientSession | None = None
+        self._janitor: asyncio.Task | None = None
 
     async def start(self) -> None:
         self._session = aiohttp.ClientSession()
+        self._janitor = asyncio.create_task(self._cleanup_loop())
 
     async def close(self) -> None:
+        if self._janitor:
+            self._janitor.cancel()
+            try:
+                await self._janitor
+            except asyncio.CancelledError:
+                pass
         if self._session:
             await self._session.close()
+
+    # ---- 缓存定时清理 ----
+
+    async def _cleanup_loop(self) -> None:
+        interval = self._cfg.cache.cleanup_interval_seconds
+        if interval <= 0:
+            log.info("缓存定时清理已禁用 (cleanup_interval_seconds=%d)", interval)
+            return
+        log.info("缓存定时清理已启动，间隔 %d 秒", interval)
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                self._cleanup_once()
+            except Exception:
+                log.exception("缓存清理任务异常")
+
+    def _cleanup_once(self) -> None:
+        removed = 0
+        for path in self.file_cache.purge_expired():
+            if self._unlink(path):
+                removed += 1
+        for path in self.cover_cache.purge_expired():
+            if self._unlink(path):
+                removed += 1
+        removed += self._sweep_orphans()
+        self.meta_cache.purge_expired()
+        self.duplicate.purge_expired()
+        if removed:
+            log.info("缓存清理：删除 %d 个过期文件", removed)
+        else:
+            log.debug("缓存清理：无过期文件")
+
+    def _unlink(self, path: Path) -> bool:
+        try:
+            path.unlink(missing_ok=True)
+            return True
+        except OSError as e:
+            log.warning("缓存文件删除失败 %s: %s", path, e)
+            return False
+
+    def _sweep_orphans(self) -> int:
+        """删除缓存目录中未被索引跟踪且已老化的文件（崩溃残留、中间流文件等）。
+
+        阈值取 file_ttl + parse_timeout：下载中的文件 mtime 持续更新且受
+        parse_timeout 约束，仍在缓存索引中的活跃文件一律跳过，均不会被误删。
+        """
+        max_age = (self._cfg.cache.file_ttl_seconds
+                   + self._cfg.limits.parse_timeout_seconds)
+        now = time.time()
+        live = set(self.file_cache.live_paths()) | set(self.cover_cache.live_paths())
+        removed = 0
+        for d in (self._downloads_dir, self._covers_dir):
+            if not d.is_dir():
+                continue
+            for f in d.iterdir():
+                if not f.is_file() or f in live:
+                    continue
+                try:
+                    if now - f.stat().st_mtime <= max_age:
+                        continue
+                    f.unlink()
+                except OSError as e:
+                    log.warning("缓存文件删除失败 %s: %s", f, e)
+                    continue
+                removed += 1
+        return removed
 
     async def handle_message(self, msg: InboundMessage) -> None:
         if msg.message_id and self.msg_dedup.seen(msg.message_id):
