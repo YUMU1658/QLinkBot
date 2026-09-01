@@ -44,6 +44,7 @@ docker compose logs -f               # 查看运行日志
 | 配置项 | 默认值 | 说明 |
 |---|---|---|
 | `limits.max_file_size_mb` | 30 | 超过该大小的文件不发送 |
+| `limits.probe_real_size` | true | 下载前向 B 站 CDN 发 Range 请求探测实际文件大小用于预检；失败自动回落为 playurl API filesize 估算 |
 | `limits.parse_timeout_seconds` | 300 | 解析超时时间 |
 | `cache.file_ttl_seconds` | 600 | 已下载视频与封面图片的缓存时长（共用） |
 | `cache.metadata_ttl_seconds` | 1800 | 元数据缓存时长 |

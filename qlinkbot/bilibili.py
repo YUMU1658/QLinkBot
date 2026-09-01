@@ -47,8 +47,9 @@ class VideoMeta:
     cover: str = ""
 
     def to_cache(self) -> dict:
-        return {f.name: getattr(self, f.name)
-                for f in fields(self) if f.name != "estimated_size"}
+        # estimated_size 一并缓存：同视频同清晰度大小固定，
+        # 缓存命中路径也能参与大小预检；旧缓存缺该字段时取默认值 0
+        return {f.name: getattr(self, f.name) for f in fields(self)}
 
     @classmethod
     def from_cache(cls, data: dict) -> "VideoMeta":
@@ -114,22 +115,83 @@ def _has_ffmpeg() -> bool:
     return shutil.which("ffmpeg") is not None
 
 
+def _selected_formats(info: dict) -> list[dict]:
+    """按顶层 format_id 取选中的格式条目。
+
+    yt-dlp 对 bv*+ba 合并格式的顶层 format_id 是 "30016+30216" 这样的
+    "+" 拼接串，需拆分后逐条匹配（各流的 filesize 来自 playurl API 的
+    精确字节数）。
+    """
+    ids = {p for p in str(info.get("format_id") or "").split("+") if p}
+    return [f for f in info.get("formats") or [] if f.get("format_id") in ids]
+
+
 def _estimate_size(info: dict) -> int:
     duration = info.get("duration") or 0
-    fmt_id = info.get("format_id")
     total = 0
-    for f in info.get("formats") or []:
-        if f.get("format_id") == fmt_id:
-            size = f.get("filesize") or f.get("filesize_approx")
-            if size:
-                total += int(size)
-                continue
-            tbr = f.get("tbr") or ((f.get("height") or 360) * 8)
-            total += int(tbr * 1000 / 8 * duration)
+    for f in _selected_formats(info):
+        size = f.get("filesize") or f.get("filesize_approx")
+        if size:
+            total += int(size)
+            continue
+        tbr = f.get("tbr") or ((f.get("height") or 360) * 8)
+        total += int(tbr * 1000 / 8 * duration)
     if total:
         return total
     # 兜底：按 360P 常见码率粗估
     return int(700 * 1000 / 8 * duration) if duration else 0
+
+
+_CONTENT_RANGE_RE = re.compile(r"bytes\s+\d+-\d+/(\d+)")
+
+
+def _content_range_total(value: str | None) -> int | None:
+    """从 Content-Range 头取文件总大小，如 "bytes 0-0/123456" → 123456。"""
+    if not value:
+        return None
+    m = _CONTENT_RANGE_RE.search(value)
+    return int(m.group(1)) if m else None
+
+
+async def _probe_real_size(session: aiohttp.ClientSession,
+                           formats: list[dict]) -> int | None:
+    """向 CDN 发 Range: bytes=0-0 请求探测选中各流的实际字节大小并求和。
+
+    仅支持单 URL 直链格式；任一流探测失败即返回 None，由调用方回落
+    到 playurl API 的 filesize 估算值。
+    """
+    urls = []
+    for f in formats:
+        if f.get("fragments") or not f.get("url"):
+            return None
+        urls.append(f["url"])
+    headers = {"User-Agent": _USER_AGENT,
+               "Referer": "https://www.bilibili.com/"}
+
+    async def probe_one(url: str) -> int | None:
+        async with session.get(url, headers=headers,
+                               timeout=aiohttp.ClientTimeout(total=8)) as resp:
+            if resp.status == 206:
+                return _content_range_total(resp.headers.get("Content-Range"))
+            if resp.status == 200:  # CDN 不支持 Range 时退回 Content-Length
+                length = resp.headers.get("Content-Length")
+                return int(length) if length and length.isdigit() else None
+            return None
+
+    try:
+        results = await asyncio.wait_for(
+            asyncio.gather(*(probe_one(u) for u in urls),
+                           return_exceptions=True),
+            timeout=10)
+    except (asyncio.TimeoutError, aiohttp.ClientError) as e:
+        log.debug("CDN 大小探测失败，回落估算: %s", e)
+        return None
+    total = 0
+    for r in results:
+        if not isinstance(r, int) or r <= 0:
+            return None
+        total += r
+    return total or None
 
 
 async def _run_ytdlp(args: list[str], timeout: int) -> str:
@@ -157,13 +219,17 @@ async def _run_ytdlp(args: list[str], timeout: int) -> str:
 class BilibiliParser:
     platform = "bilibili"
 
-    def __init__(self, session: aiohttp.ClientSession | None = None) -> None:
+    def __init__(self, session: aiohttp.ClientSession | None = None,
+                 probe_real_size: bool = True) -> None:
         self._session = session
+        self._probe_real_size = probe_real_size
 
     async def probe(self, url: str, timeout: int) -> VideoMeta:
+        # 与 download() 使用同一格式选择器，保证预检对象与实际下载一致
+        selector = _FORMAT_MERGED if _has_ffmpeg() else _FORMAT_PROGRESSIVE
         out = await _run_ytdlp(
             ["--dump-single-json", "-J",
-             "--user-agent", _USER_AGENT, url],
+             "--user-agent", _USER_AGENT, "-f", selector, url],
             timeout,
         )
         try:
@@ -186,6 +252,11 @@ class BilibiliParser:
             cover=str(data.get("thumbnail") or ""),
         )
         meta.estimated_size = _estimate_size(data)
+        if self._probe_real_size and self._session is not None:
+            real = await _probe_real_size(self._session,
+                                          _selected_formats(data))
+            if real:
+                meta.estimated_size = real
         if not meta.bvid:
             raise ParseError("未能取得视频 ID（可能不是普通视频内容）")
         await _enrich_stats(self._session, meta)

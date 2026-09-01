@@ -24,6 +24,8 @@ class BotConfig:
 @dataclass
 class LimitsConfig:
     max_file_size_mb: int = 30
+    # 下载前向 B 站 CDN 发 Range 请求探测实际文件大小；失败自动回落估算值
+    probe_real_size: bool = True
     parse_timeout_seconds: int = 300
     rate_limit_count: int = 10
     rate_limit_window_seconds: int = 60
@@ -94,6 +96,8 @@ def load_config(path: str | Path) -> Config:
                 "rate_limit_count", "rate_limit_window_seconds"):
         if fld in limits:
             setattr(cfg.limits, fld, int(limits[fld]))
+    if "probe_real_size" in limits:
+        cfg.limits.probe_real_size = bool(limits["probe_real_size"])
     cache = raw.get("cache", {})
     for fld in ("file_ttl_seconds", "metadata_ttl_seconds",
                 "duplicate_window_seconds", "cleanup_interval_seconds"):

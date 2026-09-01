@@ -28,7 +28,8 @@ class Pipeline:
         self._cfg = cfg
         self._api = api
         self._sender = Sender(api)
-        self._parser = BilibiliParser(api.session)
+        self._parser = BilibiliParser(
+            api.session, probe_real_size=cfg.limits.probe_real_size)
         self._downloads_dir = downloads_dir
         self.file_cache = FileCache(cfg.cache.file_ttl_seconds)
         # 封面文件缓存与视频文件缓存共用同一 TTL 配置（cache.file_ttl_seconds）
