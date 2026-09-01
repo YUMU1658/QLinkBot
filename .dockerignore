@@ -1,0 +1,12 @@
+.git
+.gitignore
+.gitattributes
+.zcode
+__pycache__/
+*.pyc
+config.toml
+downloads/
+Dockerfile
+docker-compose.yml
+.dockerignore
+README.md

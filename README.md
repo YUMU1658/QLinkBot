@@ -18,6 +18,16 @@ copy config.example.toml config.toml   # 填写 appid / secret
 python -m qlinkbot.main
 ```
 
+## Docker Compose 部署
+
+```bash
+cp config.example.toml config.toml   # 填写 appid / secret
+docker compose up -d --build
+docker compose logs -f               # 查看运行日志
+```
+
+镜像内置 ffmpeg（启用 B 站高画质 dash 合并流）。`config.toml` 以只读方式挂载进容器，`downloads/` 缓存目录挂载到宿主机，配置修改后 `docker compose restart` 生效。机器人通过出站 WebSocket 连接 QQ 服务，无需暴露端口。
+
 ## 配置说明
 
 | 配置项 | 默认值 | 说明 |
