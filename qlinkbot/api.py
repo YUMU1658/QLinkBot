@@ -99,6 +99,21 @@ class QQApi:
         return await self._request(
             "POST", f"/v2/groups/{group_openid}/messages", body)
 
+    # ---- 互动回调（卡片按钮点击） ----
+
+    async def put_interaction(self, interaction_id: str, code: int) -> Any:
+        """回应按钮互动：0=成功 4=无权限 5=仅管理员操作；同一事件仅可回应一次。"""
+        return await self._request(
+            "PUT", f"/interactions/{interaction_id}", {"code": code})
+
+    # ---- 指令面板 ----
+
+    async def list_panels(self, scope: str) -> Any:
+        return await self._request("GET", f"/v2/panels?scope={scope}")
+
+    async def create_panel(self, body: dict) -> Any:
+        return await self._request("POST", "/v2/panels", body)
+
     # ---- 富媒体上传 ----
 
     async def upload_user_media(self, user_openid: str, file_type: int,

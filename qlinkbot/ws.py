@@ -17,6 +17,9 @@ from .api import QQApi
 log = logging.getLogger(__name__)
 
 INTENT_GROUP_AND_C2C_EVENT = 1 << 25
+INTENT_INTERACTION = 1 << 26
+# 群/C2C 消息 + 卡片按钮点击等互动回调
+INTENTS = INTENT_GROUP_AND_C2C_EVENT | INTENT_INTERACTION
 
 OP_DISPATCH = 0
 OP_HEARTBEAT = 1
@@ -99,7 +102,7 @@ class WsClient:
             "op": OP_IDENTIFY,
             "d": {
                 "token": f"QQBot {token}",
-                "intents": INTENT_GROUP_AND_C2C_EVENT,
+                "intents": INTENTS,
                 "shard": [0, 1],
                 "properties": {},
             },

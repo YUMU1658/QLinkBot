@@ -7,10 +7,11 @@ import logging
 import sys
 from pathlib import Path
 
+from .admin import register_admin_panel
 from .api import QQApi
 from .auth import TokenManager
 from .config import load_config, validate_config
-from .events import parse_event
+from .events import parse_event, parse_interaction
 from .pipeline import Pipeline
 from .ws import WsClient
 
@@ -36,12 +37,21 @@ async def main() -> None:
     pipeline = Pipeline(cfg, api, downloads_dir)
 
     async def on_dispatch(event_type: str, data: dict) -> None:
+        # 卡片按钮点击回调
+        if event_type == "INTERACTION_CREATE":
+            ev = parse_interaction(event_type, data)
+            if ev is not None:
+                await pipeline.admin.handle_interaction(ev)
+            return
         msg = parse_event(event_type, data)
         if msg is None:
             return
         await pipeline.handle_message(msg)
 
     ws = WsClient(api, tokens, on_dispatch)
+
+    # 通过指令面板接口注册 /管理 指令（失败仅告警）
+    await register_admin_panel(api, cfg)
 
     await pipeline.start()
     log.info("QLinkBot 已启动 (appid=%s)", cfg.bot.appid)

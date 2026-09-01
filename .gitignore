@@ -4,3 +4,4 @@ downloads/
 *.pyc
 .env
 .ZCode/
+data/

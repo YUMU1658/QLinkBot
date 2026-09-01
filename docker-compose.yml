@@ -7,3 +7,4 @@ services:
     volumes:
       - ./config.toml:/app/config.toml:ro
       - ./downloads:/app/downloads
+      - ./data:/app/data

@@ -18,6 +18,21 @@ class InboundMessage:
     user_openid: str
     group_openid: str | None
     is_group: bool
+    # 群消息发送者角色：member/admin/owner；私聊为空
+    member_role: str = ""
+
+
+@dataclass(frozen=True)
+class InteractionEvent:
+    """卡片按钮点击回调（INTERACTION_CREATE，type=11）。"""
+    interaction_id: str
+    session_key: str
+    user_openid: str      # 私聊场景即点击者
+    group_openid: str | None
+    clicker_openid: str   # 点击者：群聊为 group_member_openid，私聊为 user_openid
+    is_group: bool
+    button_id: str
+    button_data: str
 
 
 def parse_event(event_type: str, data: dict) -> InboundMessage | None:
@@ -43,4 +58,40 @@ def parse_event(event_type: str, data: dict) -> InboundMessage | None:
         user_openid=user_openid,
         group_openid=group_openid,
         is_group=(event_type != "C2C_MESSAGE_CREATE"),
+        member_role=str(author.get("member_role", "") or ""),
+    )
+
+
+def parse_interaction(event_type: str, data: dict) -> InteractionEvent | None:
+    if event_type != "INTERACTION_CREATE":
+        return None
+    # type=11 为消息按钮回调，其余互动场景暂不处理
+    if data.get("type") not in (11, "11"):
+        return None
+    resolved = (data.get("data") or {}).get("resolved") or {}
+    group_openid = data.get("group_openid")
+    user_openid = data.get("user_openid") or ""
+    chat_type = data.get("chat_type")  # 1=群聊 2=单聊
+    is_group = bool(group_openid) and (user_openid == "" or chat_type == 1)
+    if is_group:
+        if not group_openid:
+            log.warning("INTERACTION_CREATE 群场景缺少 group_openid: %s", data)
+            return None
+        clicker = data.get("group_member_openid") or ""
+        session_key = f"group:{group_openid}"
+    else:
+        if not user_openid:
+            log.warning("INTERACTION_CREATE 缺少 user_openid: %s", data)
+            return None
+        clicker = user_openid
+        session_key = f"c2c:{user_openid}"
+    return InteractionEvent(
+        interaction_id=str(data.get("id", "")),
+        session_key=session_key,
+        user_openid=clicker,
+        group_openid=group_openid,
+        clicker_openid=clicker,
+        is_group=is_group,
+        button_id=str(resolved.get("button_id", "") or ""),
+        button_data=str(resolved.get("button_data", "") or ""),
     )

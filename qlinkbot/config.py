@@ -56,12 +56,23 @@ class PlatformsConfig:
 
 
 @dataclass
+class AdminConfig:
+    # 管理指令文本（触发词，需与指令面板注册的名称一致）
+    command: str = "/管理"
+    # 启动时通过指令面板接口注册该指令
+    register_panel: bool = True
+    # 会话级解析开关的持久化文件；留空则仅存内存（重启丢失）
+    session_store_path: str = "data/session_settings.json"
+
+
+@dataclass
 class Config:
     bot: BotConfig = field(default_factory=BotConfig)
     limits: LimitsConfig = field(default_factory=LimitsConfig)
     cache: CacheConfig = field(default_factory=CacheConfig)
     behavior: BehaviorConfig = field(default_factory=BehaviorConfig)
     platforms: PlatformsConfig = field(default_factory=PlatformsConfig)
+    admin: AdminConfig = field(default_factory=AdminConfig)
 
     @property
     def max_file_size_bytes(self) -> int:
@@ -97,6 +108,13 @@ def load_config(path: str | Path) -> Config:
     bili = platforms.get("bilibili", {})
     if "enabled" in bili:
         cfg.platforms.bilibili.enabled = bool(bili["enabled"])
+    admin = raw.get("admin", {})
+    if "command" in admin:
+        cfg.admin.command = str(admin["command"])
+    if "register_panel" in admin:
+        cfg.admin.register_panel = bool(admin["register_panel"])
+    if "session_store_path" in admin:
+        cfg.admin.session_store_path = str(admin["session_store_path"])
     return cfg
 
 

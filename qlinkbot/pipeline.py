@@ -9,6 +9,7 @@ from pathlib import Path
 
 import aiohttp
 
+from .admin import AdminService
 from .api import QQApi, QQApiError
 from .bilibili import BilibiliParser, ParseError, ParseTimeout, TooLargeError
 from .caches import DuplicateLimiter, FileCache, MetadataCache, MessageDedup, RateLimiter
@@ -16,6 +17,7 @@ from .config import Config
 from .events import InboundMessage
 from .extract import extract_target, normalize_target
 from .sender import Sender, build_text_reply
+from .sessionconfig import BiliOptions, SessionConfigStore
 
 log = logging.getLogger(__name__)
 
@@ -37,6 +39,9 @@ class Pipeline:
         self.rate_limiter = RateLimiter(cfg.limits.rate_limit_count,
                                         cfg.limits.rate_limit_window_seconds)
         self.msg_dedup = MessageDedup()
+        # 会话级解析开关（/管理 指令读写）与对应管理服务
+        self.session_options = SessionConfigStore(cfg.admin.session_store_path)
+        self.admin = AdminService(cfg, api, self._sender, self.session_options)
         # 限制并发解析任务，防止突发消息拖垮机器
         self._parse_sem = asyncio.Semaphore(3)
         self._session: aiohttp.ClientSession | None = None
@@ -126,7 +131,20 @@ class Pipeline:
         if msg.message_id and self.msg_dedup.seen(msg.message_id):
             return
 
+        # 学习群成员角色（供管理按钮回调的纵深校验）
+        self.admin.observe(msg)
+
         content = msg.content or ""
+        # /管理 指令优先于链接解析分发
+        if self._is_admin_command(content):
+            await self.admin.handle_command(msg)
+            return
+
+        # 会话内 bilibili 解析被 /管理 关闭时完全禁用（指令本身不受影响）
+        opts = self.session_options.get(msg.session_key)
+        if not opts.enabled:
+            return
+
         raw_target = extract_target(content)
         if raw_target is None:
             return
@@ -152,7 +170,8 @@ class Pipeline:
         if cached_file is not None and meta is not None:
             log.info("[%s] 命中文件缓存 %s", msg.session_key, video_key)
             try:
-                await self._send_result(msg, meta, cached_file, video_key)
+                await self._send_result(msg, meta, cached_file, video_key,
+                                        opts)
             except QQApiError as e:
                 log.warning("缓存文件重发失败: %s", e)
                 await self._maybe_report(msg, "failed")
@@ -167,7 +186,7 @@ class Pipeline:
         async with self._parse_sem:
             try:
                 acquired = True
-                await self._process(msg, target, video_key)
+                await self._process(msg, target, video_key, opts)
             except (ParseTimeout,) as e:
                 log.warning("解析超时 %s: %s", video_key, e)
                 self.rate_limiter.release()
@@ -187,8 +206,16 @@ class Pipeline:
 
     # ---- 内部流程 ----
 
+    def _is_admin_command(self, content: str) -> bool:
+        """匹配管理指令；全量消息模式下 @机器人 的消息以 GROUP_MESSAGE_CREATE
+        推送且 content 保留 @前缀（与文档不符），故剥离开头的 @提及 再比较。"""
+        tokens = (content or "").strip().split()
+        while tokens and tokens[0].startswith("@"):
+            tokens.pop(0)
+        return " ".join(tokens) == self._cfg.admin.command
+
     async def _process(self, msg: InboundMessage, target,
-                       video_key: str) -> None:
+                       video_key: str, opts: BiliOptions) -> None:
         timeout_budget = self._cfg.limits.parse_timeout_seconds
 
         meta = self._load_meta(video_key)
@@ -210,7 +237,7 @@ class Pipeline:
             raise TooLargeError(
                 f"实际 {actual_size / 1024 / 1024:.1f}MB 超过限制")
 
-        await self._send_result(msg, meta, file_path, video_key)
+        await self._send_result(msg, meta, file_path, video_key, opts)
 
         # 全部成功：记录各类缓存与计数
         self.file_cache.put(video_key, file_path)
@@ -250,8 +277,9 @@ class Pipeline:
         return ""
 
     async def _send_result(self, msg: InboundMessage, meta,
-                           file_path: Path, video_key: str) -> None:
-        text = build_text_reply(meta)
+                           file_path: Path, video_key: str,
+                           opts: BiliOptions) -> None:
+        text = build_text_reply(meta, opts)
         prefix = self._at_prefix(msg)
         if prefix:
             text = prefix + text
@@ -262,10 +290,12 @@ class Pipeline:
             seq_box[0] += 1
             return seq_box[0]
 
-        cover = await self._ensure_cover(meta, video_key)
+        # 封面被会话配置关闭时不下载、不发送
+        cover = await self._ensure_cover(meta, video_key) if opts.cover \
+            else None
 
         combined_done = False
-        if cover is not None and self._cfg.behavior.media_with_text:
+        if cover is not None and text and self._cfg.behavior.media_with_text:
             # 优先图文同条发送；平台拒绝时自动拆为两条
             try:
                 await self._sender.reply_cover_with_text(
@@ -273,15 +303,19 @@ class Pipeline:
                 combined_done = True
             except QQApiError as e:
                 log.warning("图文同条发送失败，降级为分开两条: %s", e)
-        if not combined_done:
+        if not combined_done and text:
             await self._sender.reply_text(msg, text, next_seq())
-            if cover is not None:
-                try:
-                    await self._sender.send_cover(msg, cover, next_seq())
-                except QQApiError as e:
-                    log.warning("封面发送失败（继续发送视频）: %s", e)
+        if not combined_done and cover is not None:
+            try:
+                await self._sender.send_cover(msg, cover, next_seq())
+            except QQApiError as e:
+                log.warning("封面发送失败（继续发送视频）: %s", e)
 
-        await self._sender.send_video(msg, file_path, next_seq())
+        if opts.video:
+            await self._sender.send_video(msg, file_path, next_seq())
+        else:
+            log.info("[%s] 会话配置关闭视频发送，跳过 %s",
+                     msg.session_key, video_key)
 
     async def _maybe_report(self, msg: InboundMessage,
                             kind: str) -> None:

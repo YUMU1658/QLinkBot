@@ -12,21 +12,12 @@ import aiohttp
 from .api import QQApi, QQApiError
 from .bilibili import VideoMeta
 from .events import InboundMessage
+from .sessionconfig import BiliOptions
 
 log = logging.getLogger(__name__)
 
 FILE_TYPE_IMAGE = 1
 FILE_TYPE_VIDEO = 2
-
-REPLY_TEMPLATE = """{title}
-UP：{uploader}
-
-播放 {views}　弹幕 {danmaku}　点赞 {likes}
-收藏 {favorites}　投币 {coins}　评论 {comments}
-
-{description}
-
-原视频：https://www.bilibili.com/video/{bvid}"""
 
 DESC_MAX = 100
 
@@ -46,19 +37,25 @@ def _truncate_desc(text: str) -> str:
     return text or "（无简介）"
 
 
-def build_text_reply(meta: VideoMeta) -> str:
-    return REPLY_TEMPLATE.format(
-        title=meta.title,
-        uploader=meta.uploader,
-        views=_fmt_count(meta.views),
-        danmaku=_fmt_count(meta.danmaku),
-        likes=_fmt_count(meta.likes),
-        favorites=_fmt_count(meta.favorites),
-        coins=_fmt_count(meta.coins),
-        comments=_fmt_count(meta.comments),
-        description=_truncate_desc(meta.description),
-        bvid=meta.bvid,
-    )
+def build_text_reply(meta: VideoMeta,
+                     opts: BiliOptions | None = None) -> str:
+    """按会话配置组装文字回复；标题/数据/简介/链接均关闭时返回空串。"""
+    if opts is None:
+        opts = BiliOptions()
+    parts: list[str] = []
+    if opts.title:
+        parts.append(f"{meta.title}\nUP：{meta.uploader}")
+    if opts.stats:
+        parts.append(
+            f"播放 {_fmt_count(meta.views)}　弹幕 {_fmt_count(meta.danmaku)}"
+            f"　点赞 {_fmt_count(meta.likes)}\n"
+            f"收藏 {_fmt_count(meta.favorites)}　投币 {_fmt_count(meta.coins)}"
+            f"　评论 {_fmt_count(meta.comments)}")
+    if opts.intro:
+        parts.append(_truncate_desc(meta.description))
+    if opts.link:
+        parts.append(f"原视频：https://www.bilibili.com/video/{meta.bvid}")
+    return "\n\n".join(parts)
 
 
 class Sender:
@@ -95,6 +92,32 @@ class Sender:
         media = await self._prepare_media(msg, file_path, FILE_TYPE_VIDEO,
                                           file_name)
         return await self._send_media(msg, media, seq)
+
+    async def send_markdown(self, msg: InboundMessage, content: str,
+                            keyboard: dict, seq: int) -> dict:
+        """markdown + 按钮卡片，作为消息的被动回复（msg_id 路径）。"""
+        body = self._markdown_body(content, keyboard, seq)
+        return await self._send(msg, body)
+
+    async def send_markdown_event(self, is_group: bool, openid: str,
+                                  event_id: str, content: str,
+                                  keyboard: dict, seq: int) -> dict:
+        """markdown + 按钮卡片，以事件为锚点的被动回复（event_id 路径，
+        用于按钮 INTERACTION_CREATE 回调）。"""
+        body = self._markdown_body(content, keyboard, seq)
+        body.pop("msg_id", None)
+        body["event_id"] = event_id
+        if is_group:
+            return await self._api.send_group_message(openid, body)
+        return await self._api.send_user_message(openid, body)
+
+    @staticmethod
+    def _markdown_body(content: str, keyboard: dict, seq: int) -> dict:
+        body = Sender._base_body(seq)
+        body["msg_type"] = 2
+        body["markdown"] = {"content": content}
+        body["keyboard"] = keyboard
+        return body
 
     @staticmethod
     def _base_body(seq: int) -> dict:

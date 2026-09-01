@@ -20,3 +20,8 @@ media_with_text = true    # 尝试封面+文字同条发送；平台不支持时
 
 [platforms.bilibili]
 enabled = true
+
+[admin]
+command = "/管理"                  # 管理指令触发词，同时用于指令面板注册
+register_panel = true              # 启动时通过 QQ 指令面板接口注册该指令
+session_store_path = "data/session_settings.json"   # 会话级解析开关的持久化文件；留空则仅存内存
