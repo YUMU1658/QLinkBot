@@ -207,12 +207,8 @@ class Pipeline:
     # ---- 内部流程 ----
 
     def _is_admin_command(self, content: str) -> bool:
-        """匹配管理指令；全量消息模式下 @机器人 的消息以 GROUP_MESSAGE_CREATE
-        推送且 content 保留 @前缀（与文档不符），故剥离开头的 @提及 再比较。"""
-        tokens = (content or "").strip().split()
-        while tokens and tokens[0].startswith("@"):
-            tokens.pop(0)
-        return " ".join(tokens) == self._cfg.admin.command
+        """匹配管理指令；content 已在 events 层剥离 @机器人 前缀。"""
+        return (content or "").strip() == self._cfg.admin.command
 
     async def _process(self, msg: InboundMessage, target,
                        video_key: str, opts: BiliOptions) -> None:

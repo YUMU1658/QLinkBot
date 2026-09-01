@@ -45,6 +45,7 @@ async def main() -> None:
             return
         msg = parse_event(event_type, data)
         if msg is None:
+            log.debug("忽略未处理事件类型 %s", event_type)
             return
         await pipeline.handle_message(msg)
 

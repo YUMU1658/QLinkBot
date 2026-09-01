@@ -3,9 +3,29 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 
 log = logging.getLogger(__name__)
+
+# 消息开头 @ 段的三种已知形态：
+# - <qqbot-at-user id="..." />：v2 富文本 at 段（本项目发送侧即此格式）
+# - <@!id> / <@id>：频道风格 at 标签
+# - @昵称（含全角＠）：纯文本 at
+_AT_SEGMENT_RE = re.compile(
+    r"(?:<qqbot-at-(?:user|everyone)\b[^>]*>"
+    r"|<@!?[^>\s]+>"
+    r"|[＠@]\S+)")
+
+
+def strip_at_prefix(content: str) -> str:
+    """循环剥离开头的 @ 段与前导空白；只处理消息开头，不碰中部文本。"""
+    text = (content or "").lstrip()
+    while True:
+        m = _AT_SEGMENT_RE.match(text)
+        if not m:
+            return text.strip()
+        text = text[m.end():].lstrip()
 
 
 @dataclass(frozen=True)
@@ -50,10 +70,16 @@ def parse_event(event_type: str, data: dict) -> InboundMessage | None:
             log.warning("%s 缺少 group_openid: %s", event_type, data)
             return None
         session_key = f"group:{group_openid}"
+    # 全量消息模式下 @机器人 的消息 content 会保留 @ 段（与文档不符，
+    # 以 GROUP_MESSAGE_CREATE 推送），统一剥掉再交给下游
+    raw = str(data.get("content", ""))
+    content = strip_at_prefix(raw)
+    if content != raw.strip():
+        log.info("剥离 @ 前缀 (%s): %r -> %r", event_type, raw, content)
     return InboundMessage(
         event_type=event_type,
         message_id=str(data.get("id", "")),
-        content=str(data.get("content", "")),
+        content=content,
         session_key=session_key,
         user_openid=user_openid,
         group_openid=group_openid,
