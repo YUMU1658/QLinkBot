@@ -46,6 +46,7 @@ docker compose logs -f               # 查看运行日志
 | `limits.max_file_size_mb` | 30 | 超过该大小的文件不发送 |
 | `limits.probe_real_size` | true | 下载前向 B 站 CDN 发 Range 请求探测实际文件大小用于预检；失败自动回落为 playurl API filesize 估算 |
 | `limits.parse_timeout_seconds` | 300 | 解析超时时间 |
+| `limits.error_retry_count` | 3 | yt-dlp 解析遇暂时性错误（HTTP 412/429/5xx）时的重试次数，指数退避间隔重试；`0` 不重试 |
 | `cache.file_ttl_seconds` | 600 | 已下载视频与封面图片的缓存时长（共用） |
 | `cache.metadata_ttl_seconds` | 1800 | 元数据缓存时长 |
 | `cache.duplicate_window_seconds` | 600 | 会话内重复视频限速窗口 |

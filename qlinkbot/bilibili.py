@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 import re
 import shutil
 import sys
@@ -194,35 +195,54 @@ async def _probe_real_size(session: aiohttp.ClientSession,
     return total or None
 
 
-async def _run_ytdlp(args: list[str], timeout: int) -> str:
+# 风控/服务端类暂时性错误（如 412 Precondition Failed），重试通常可恢复；
+# yt-dlp 对网页请求的 412 不做任何原生重试，只能在本层处理
+_TRANSIENT_HTTP_RE = re.compile(r"HTTP Error (?:412|429|5\d\d)")
+
+
+def _is_transient_error(stderr: str) -> bool:
+    return bool(_TRANSIENT_HTTP_RE.search(stderr))
+
+
+async def _run_ytdlp(args: list[str], timeout: int, retries: int = 0) -> str:
     cmd = [sys.executable, "-m", "yt_dlp", "--no-playlist",
            "--no-warnings", "--socket-timeout", "15"] + args
     log.debug("执行: %s", " ".join(cmd))
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout)
-    except asyncio.TimeoutError:
-        with suppress(ProcessLookupError):
-            proc.kill()
-            await proc.wait()
-        raise ParseTimeout(f"yt-dlp 执行超时({timeout}s)")
-    if proc.returncode != 0:
+    for attempt in range(max(retries, 0) + 1):
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout)
+        except asyncio.TimeoutError:
+            with suppress(ProcessLookupError):
+                proc.kill()
+                await proc.wait()
+            raise ParseTimeout(f"yt-dlp 执行超时({timeout}s)")
+        if proc.returncode == 0:
+            return stdout.decode("utf-8", "replace")
         err = stderr.decode("utf-8", "replace").strip()
-        raise ParseError(f"yt-dlp 失败(code={proc.returncode}): {err[-500:]}")
-    return stdout.decode("utf-8", "replace")
+        if attempt < retries and _is_transient_error(err):
+            delay = min(2 ** attempt, 8) + random.uniform(0, 1)
+            log.warning("yt-dlp 暂时性失败(第 %d 次)，%.1fs 后重试: %s",
+                        attempt + 1, delay, err[-300:])
+            await asyncio.sleep(delay)
+            continue
+        break
+    raise ParseError(f"yt-dlp 失败(code={proc.returncode}): {err[-500:]}")
 
 
 class BilibiliParser:
     platform = "bilibili"
 
     def __init__(self, session: aiohttp.ClientSession | None = None,
-                 probe_real_size: bool = True) -> None:
+                 probe_real_size: bool = True,
+                 error_retries: int = 3) -> None:
         self._session = session
         self._probe_real_size = probe_real_size
+        self._error_retries = error_retries
 
     async def probe(self, url: str, timeout: int) -> VideoMeta:
         # 与 download() 使用同一格式选择器，保证预检对象与实际下载一致
@@ -230,7 +250,7 @@ class BilibiliParser:
         out = await _run_ytdlp(
             ["--dump-single-json", "-J",
              "--user-agent", _USER_AGENT, "-f", selector, url],
-            timeout,
+            timeout, retries=self._error_retries,
         )
         try:
             data = json.loads(out)
@@ -305,10 +325,12 @@ class BilibiliParser:
             "--no-part" ,
             url,
         ]
-        await _run_ytdlp(args, timeout)
+        await _run_ytdlp(args, timeout, retries=self._error_retries)
         # 通过重新探测 id 定位产物文件
         probe_out = await _run_ytdlp(
-            ["--dump-single-json", "--get-id", "--skip-download", url], timeout // 2)
+            ["--dump-single-json", "--get-id", "--skip-download",
+             "--user-agent", _USER_AGENT, url],
+            timeout // 2, retries=self._error_retries)
         vid = probe_out.strip().splitlines()[0].strip()
         for ext in ("mp4", "mkv", "webm", "flv"):
             candidate = output_dir / f"{vid}.{ext}"

@@ -1,15 +1,19 @@
-"""bilibili 大小预检测试：格式匹配修复与 CDN Range 实际探测。"""
+"""bilibili 测试：大小预检与 yt-dlp 暂时性错误重试。"""
 
 import asyncio
 import unittest
+from unittest import mock
 
 import aiohttp
 
 from qlinkbot.bilibili import (
+    ParseError,
     VideoMeta,
     _content_range_total,
     _estimate_size,
+    _is_transient_error,
     _probe_real_size,
+    _run_ytdlp,
     _selected_formats,
 )
 
@@ -68,6 +72,94 @@ class ContentRangeTest(unittest.TestCase):
     def test_empty(self):
         self.assertIsNone(_content_range_total(None))
         self.assertIsNone(_content_range_total(""))
+
+
+class TransientErrorTest(unittest.TestCase):
+    def test_http_412_matches(self):
+        err = ("ERROR: [BiliBili] 1d5tN6LECU: Unable to download webpage: "
+               "HTTP Error 412: Precondition Failed "
+               "(caused by <HTTPError 412: Precondition Failed>)")
+        self.assertTrue(_is_transient_error(err))
+
+    def test_other_transient_codes_match(self):
+        self.assertTrue(_is_transient_error(
+            "HTTP Error 429: Too Many Requests"))
+        self.assertTrue(_is_transient_error(
+            "HTTP Error 503: Service Unavailable"))
+
+    def test_deterministic_errors_do_not_match(self):
+        self.assertFalse(_is_transient_error(
+            "ERROR: 此视频不可观看（可能是会员/地区限制）"))
+        self.assertFalse(_is_transient_error(
+            "unable to download video data: HTTP Error 403: Forbidden"))
+        self.assertFalse(_is_transient_error(""))
+
+    def test_non_http_error_does_not_match(self):
+        self.assertFalse(_is_transient_error(
+            "ERROR: unable to download video data: Errno 104"))
+
+
+class _FakeProc:
+    def __init__(self, returncode: int,
+                 stdout: bytes = b"", stderr: bytes = b""):
+        self.returncode = returncode
+        self._stdout = stdout
+        self._stderr = stderr
+
+    async def communicate(self):
+        return self._stdout, self._stderr
+
+
+class RunYtdlpRetryTest(unittest.IsolatedAsyncioTestCase):
+    _URL_ARGS = (["-J", "https://www.bilibili.com/video/BV1xx"], 10)
+
+    def _patch(self, procs: list[_FakeProc]):
+        exec_mock = mock.AsyncMock(side_effect=procs)
+        return (mock.patch("asyncio.create_subprocess_exec", exec_mock),
+                mock.patch("asyncio.sleep", new_callable=mock.AsyncMock),
+                exec_mock)
+
+    async def test_transient_failure_then_success(self):
+        procs = [
+            _FakeProc(1, stderr=b"HTTP Error 412: Precondition Failed"),
+            _FakeProc(0, stdout=b"ok"),
+        ]
+        cm_exec, cm_sleep, exec_mock = self._patch(procs)
+        with cm_exec, cm_sleep:
+            result = await _run_ytdlp(*self._URL_ARGS, retries=3)
+        self.assertEqual(result, "ok")
+        self.assertEqual(exec_mock.await_count, 2)
+
+    async def test_zero_retries_raises_immediately(self):
+        procs = [_FakeProc(1, stderr=b"HTTP Error 412: Precondition Failed")]
+        cm_exec, cm_sleep, exec_mock = self._patch(procs)
+        with cm_exec, cm_sleep, self.assertRaises(ParseError):
+            await _run_ytdlp(*self._URL_ARGS, retries=0)
+        self.assertEqual(exec_mock.await_count, 1)
+
+    async def test_negative_retries_behaves_as_zero(self):
+        procs = [_FakeProc(1, stderr=b"HTTP Error 412: Precondition Failed")]
+        cm_exec, cm_sleep, exec_mock = self._patch(procs)
+        with cm_exec, cm_sleep, self.assertRaises(ParseError):
+            await _run_ytdlp(*self._URL_ARGS, retries=-1)
+        self.assertEqual(exec_mock.await_count, 1)
+
+    async def test_non_transient_error_no_retry(self):
+        procs = [_FakeProc(1, stderr="ERROR: 此视频不可观看".encode())]
+        cm_exec, cm_sleep, exec_mock = self._patch(procs)
+        with cm_exec, cm_sleep, self.assertRaises(ParseError):
+            await _run_ytdlp(*self._URL_ARGS, retries=3)
+        self.assertEqual(exec_mock.await_count, 1)
+
+    async def test_retries_exhausted_raises_last_error(self):
+        procs = [_FakeProc(1, stderr=b"HTTP Error 412: Precondition Failed")
+                 for _ in range(4)]
+        cm_exec, cm_sleep, exec_mock = self._patch(procs)
+        with cm_exec, cm_sleep, self.assertRaises(ParseError) as ctx:
+            await _run_ytdlp(*self._URL_ARGS, retries=3)
+        self.assertIn("yt-dlp 失败(code=1)", str(ctx.exception))
+        self.assertIn("HTTP Error 412", str(ctx.exception))
+        self.assertEqual(exec_mock.await_count, 4)
 
 
 class _FakeResponse:

@@ -6,6 +6,7 @@ secret = ""
 max_file_size_mb = 30
 probe_real_size = true   # 下载前向 B 站 CDN 发 Range 请求探测实际大小，失败自动回落估算
 parse_timeout_seconds = 300
+error_retry_count = 3    # yt-dlp 解析遇暂时性错误（HTTP 412/429/5xx）时的重试次数；0 不重试
 rate_limit_count = 10
 rate_limit_window_seconds = 60
 

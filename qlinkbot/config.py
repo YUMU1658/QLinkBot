@@ -27,6 +27,8 @@ class LimitsConfig:
     # 下载前向 B 站 CDN 发 Range 请求探测实际文件大小；失败自动回落估算值
     probe_real_size: bool = True
     parse_timeout_seconds: int = 300
+    # yt-dlp 解析遇到暂时性错误（HTTP 412/429/5xx）时的重试次数；0 表示不重试
+    error_retry_count: int = 3
     rate_limit_count: int = 10
     rate_limit_window_seconds: int = 60
 
@@ -93,6 +95,7 @@ def load_config(path: str | Path) -> Config:
     cfg.bot.secret = str(bot.get("secret", ""))
     limits = raw.get("limits", {})
     for fld in ("max_file_size_mb", "parse_timeout_seconds",
+                "error_retry_count",
                 "rate_limit_count", "rate_limit_window_seconds"):
         if fld in limits:
             setattr(cfg.limits, fld, int(limits[fld]))
