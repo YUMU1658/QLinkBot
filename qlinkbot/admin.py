@@ -9,7 +9,7 @@ from .api import QQApi, QQApiError
 from .config import Config
 from .events import InboundMessage, InteractionEvent
 from .sender import Sender
-from .sessionconfig import BiliOptions, SessionConfigStore
+from .sessionconfig import BiliOptions, PLATFORM_BILIBILI, SessionConfigStore
 
 log = logging.getLogger(__name__)
 
@@ -18,17 +18,7 @@ DATA_MENU = "admin:menu"
 DATA_BILI_SETTINGS = "admin:bili"
 DATA_BILI_TOGGLE = "admin:bilitoggle:"
 
-# 开关键 -> 设置卡片状态列表里的显示名
-TOGGLE_LABELS = {
-    "enabled": "bilibili 解析",
-    "cover": "发送封面",
-    "title": "发送标题（含 UP 主）",
-    "intro": "发送简介",
-    "stats": "发送视频数据",
-    "link": "发送原视频链接",
-    "video": "发送视频",
-}
-# 按钮文字（label 平台限制 10 字符内，故与上方显示名分开）
+# 按钮文字（label 平台限制 10 字符内）
 TOGGLE_BUTTON_LABELS = {
     "enabled": "B站解析",
     "cover": "发送封面",
@@ -75,10 +65,7 @@ def _menu_card(at_openid: str | None,
 
 def _bili_settings_card(opts: BiliOptions,
                         admin_only: bool) -> tuple[str, dict]:
-    status = "\n".join(
-        f"- {TOGGLE_LABELS[key]}：{'开' if getattr(opts, key) else '关'}"
-        for key in TOGGLE_ORDER)
-    text = f"## bilibili 解析设置\n{status}\n点击按钮切换对应开关："
+    text = "## bilibili 解析设置\n点击按钮切换对应开关："
 
     def toggle(key: str) -> dict:
         on = getattr(opts, key)
@@ -181,15 +168,15 @@ class AdminService:
             if key not in TOGGLE_ORDER:
                 await self._ack(ev, 0)
                 return
-            current = self._store.get(ev.session_key)
-            opts = self._store.update(ev.session_key,
+            current = self._store.get(ev.session_key, PLATFORM_BILIBILI)
+            opts = self._store.update(ev.session_key, PLATFORM_BILIBILI,
                                       **{key: not getattr(current, key)})
             log.info("[%s] bilibili.%s -> %s",
                      ev.session_key, key, getattr(opts, key))
             content, keyboard = _bili_settings_card(opts,
                                                     admin_only=ev.is_group)
         elif data == DATA_BILI_SETTINGS:
-            opts = self._store.get(ev.session_key)
+            opts = self._store.get(ev.session_key, PLATFORM_BILIBILI)
             content, keyboard = _bili_settings_card(opts,
                                                     admin_only=ev.is_group)
         else:

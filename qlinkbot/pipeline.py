@@ -17,7 +17,7 @@ from .config import Config
 from .events import InboundMessage
 from .extract import extract_target, normalize_target
 from .sender import Sender, build_text_reply
-from .sessionconfig import BiliOptions, SessionConfigStore
+from .sessionconfig import BiliOptions, PLATFORM_BILIBILI, SessionConfigStore
 
 log = logging.getLogger(__name__)
 
@@ -143,7 +143,7 @@ class Pipeline:
             return
 
         # 会话内 bilibili 解析被 /管理 关闭时完全禁用（指令本身不受影响）
-        opts = self.session_options.get(msg.session_key)
+        opts = self.session_options.get(msg.session_key, PLATFORM_BILIBILI)
         if not opts.enabled:
             return
 

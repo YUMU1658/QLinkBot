@@ -1,4 +1,4 @@
-"""会话级解析配置：按会话（群/私聊）独立存储各解析器的开关。"""
+"""会话级解析配置：按会话（群/私聊）× 平台分层存储各解析器的开关。"""
 
 from __future__ import annotations
 
@@ -6,8 +6,12 @@ import json
 import logging
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
+from typing import Any
 
 log = logging.getLogger(__name__)
+
+# 平台标识：存储文件中 session_key 下的第一层键，各平台配置互不影响
+PLATFORM_BILIBILI = "bilibili"
 
 
 @dataclass
@@ -22,34 +26,39 @@ class BiliOptions:
     video: bool = True     # 发送视频文件
 
 
-_FIELD_NAMES = tuple(f.name for f in fields(BiliOptions))
+# 平台 -> 该平台的会话配置 dataclass；新增平台时在此注册即可
+_OPTIONS_TYPES: dict[str, type] = {PLATFORM_BILIBILI: BiliOptions}
 
 
 class SessionConfigStore:
-    """session_key -> 各解析器配置；配置了持久化路径时变更即落盘。
+    """session_key -> 平台 -> 该平台配置；配置了持久化路径时变更即落盘。
 
     session_key 由 events 层生成：群聊 "group:{group_openid}"，
     私聊 "c2c:{user_openid}"，天然会话隔离。
+    持久化结构为 session_key 下按平台名分层：
+    {"group:XXX": {"bilibili": {"enabled": true, ...}}}
     """
 
     def __init__(self, store_path: str | Path = "") -> None:
         self._path = Path(store_path) if store_path else None
-        self._data: dict[str, BiliOptions] = {}
+        self._data: dict[str, dict[str, Any]] = {}
         if self._path is not None:
             self._load()
 
-    def get(self, session_key: str) -> BiliOptions:
-        """取会话配置；未设置过的会话返回全开默认值。"""
-        opts = self._data.get(session_key)
+    def get(self, session_key: str, platform: str) -> Any:
+        """取会话内指定平台的配置；未设置过时返回该平台默认值。"""
+        opts = self._data.get(session_key, {}).get(platform)
         if opts is None:
-            opts = BiliOptions()
-            self._data[session_key] = opts
+            opts = _OPTIONS_TYPES[platform]()
+            self._data.setdefault(session_key, {})[platform] = opts
         return opts
 
-    def update(self, session_key: str, **changes: bool) -> BiliOptions:
-        opts = self.get(session_key)
+    def update(self, session_key: str, platform: str,
+               **changes: bool) -> Any:
+        opts = self.get(session_key, platform)
+        valid = {f.name for f in fields(opts)}
         for key, value in changes.items():
-            if key in _FIELD_NAMES:
+            if key in valid:
                 setattr(opts, key, bool(value))
         if self._path is not None:
             self._save()
@@ -67,19 +76,29 @@ class SessionConfigStore:
             return
         if not isinstance(raw, dict):
             return
-        for session_key, item in raw.items():
-            if not isinstance(item, dict):
+        for session_key, platforms in raw.items():
+            if not isinstance(platforms, dict):
                 continue
-            kwargs = {k: bool(v) for k, v in item.items()
-                      if k in _FIELD_NAMES}
-            self._data[session_key] = BiliOptions(**kwargs)
+            for platform, item in platforms.items():
+                opts_type = _OPTIONS_TYPES.get(platform)
+                if opts_type is None or not isinstance(item, dict):
+                    continue
+                valid = {f.name for f in fields(opts_type)}
+                kwargs = {k: bool(v) for k, v in item.items()
+                          if k in valid}
+                self._data.setdefault(session_key, {})[platform] = \
+                    opts_type(**kwargs)
         log.info("已加载 %d 个会话的解析配置 (%s)",
                  len(self._data), self._path)
 
     def _save(self) -> None:
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
-            payload = {k: asdict(v) for k, v in self._data.items()}
+            payload = {
+                session_key: {platform: asdict(opts)
+                              for platform, opts in platforms.items()}
+                for session_key, platforms in self._data.items()
+            }
             tmp = self._path.with_suffix(self._path.suffix + ".tmp")
             tmp.write_text(
                 json.dumps(payload, ensure_ascii=False, indent=1), "utf-8")
