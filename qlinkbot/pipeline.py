@@ -314,16 +314,16 @@ class Pipeline:
                            file_path: Path, video_key: str,
                            opts) -> None:
         if platform == PLATFORM_DOUYIN:
-            # 抖音会话配置暂仅总开关：封面与视频默认发送
-            text = build_douyin_text_reply(meta)
-            send_cover = True
-            send_video = True
+            # 抖音不获取、不发送封面，也没有封面开关
+            text = build_douyin_text_reply(meta, opts)
+            send_cover = False
+            send_video = bool(getattr(opts, "video", True))
         else:
             text = build_text_reply(meta, opts)
             send_cover = bool(getattr(opts, "cover", True))
             send_video = bool(getattr(opts, "video", True))
         prefix = self._at_prefix(msg)
-        if prefix:
+        if text and prefix:
             text = prefix + text
 
         seq_box = [0]

@@ -6,7 +6,7 @@ Uifid Not Found"）：UIFID 等指纹需由页面 JS 计算，纯 HTTP 拿不到
 还校验请求指纹。浏览器自己发的请求指纹正确，detail 返回 200。
 
 本模块：Playwright 打开视频页 → 拦截 `aweme/v1/web/aweme/detail`
-响应 JSON（元数据 + play_addr 直链 + 封面）→ 返回结构化结果。
+响应 JSON（元数据 + play_addr 直链）→ 返回结构化结果。
 调用方下载视频时直接用 aiohttp 下载直链（直链本身无额外风控）。
 """
 
@@ -45,7 +45,6 @@ class BrowserVideoInfo:
     shares: int = 0
     collects: int = 0
     duration_ms: int = 0
-    cover_urls: list[str] = field(default_factory=list)
     play_urls: list[str] = field(default_factory=list)
     data_size: int = 0
     is_video: bool = True
@@ -59,14 +58,6 @@ def _parse_detail(detail: dict) -> BrowserVideoInfo | None:
     video = detail.get("video") or {}
     play = video.get("play_addr") or {}
     play_urls = [u for u in (play.get("url_list") or []) if u]
-    cover = video.get("cover") or {}
-    cover_urls = [u for u in (cover.get("url_list") or []) if u]
-    if not cover_urls:
-        for key in ("origin_cover", "dynamic_cover"):
-            c = video.get(key) or {}
-            cover_urls = [u for u in (c.get("url_list") or []) if u]
-            if cover_urls:
-                break
     author = detail.get("author") or {}
     stats = detail.get("statistics") or {}
     info = BrowserVideoInfo(
@@ -80,7 +71,6 @@ def _parse_detail(detail: dict) -> BrowserVideoInfo | None:
         shares=int(stats.get("share_count") or 0),
         collects=int(stats.get("collect_count") or 0),
         duration_ms=int(video.get("duration") or 0),
-        cover_urls=cover_urls,
         play_urls=play_urls,
         data_size=int(play.get("data_size") or 0),
         is_video=bool(play_urls),
@@ -159,9 +149,8 @@ async def fetch_video_info(video_url: str,
         detail = payload.get("aweme_detail") if isinstance(payload, dict) else None
         info = _parse_detail(detail or {})
         if info is not None:
-            log.info("浏览器直取成功 aweme=%s 直链=%d 封面=%d",
-                     info.aweme_id, len(info.play_urls),
-                     len(info.cover_urls))
+            log.info("浏览器直取成功 aweme=%s 直链=%d",
+                     info.aweme_id, len(info.play_urls))
             return info
     log.warning("detail 响应中无有效 aweme_detail")
     return None

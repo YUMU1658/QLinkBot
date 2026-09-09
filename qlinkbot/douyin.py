@@ -16,7 +16,6 @@ import logging
 import re
 from dataclasses import dataclass, field, fields
 from pathlib import Path
-from urllib.parse import urlparse
 
 import aiohttp
 
@@ -40,7 +39,7 @@ _MANUAL_COOKIES_HINT = (
     "覆盖到抖音 cookies 文件后重试（详见 README 抖音小节）"
 )
 
-# 抖音站内 Referer：yt-dlp 请求、封面下载、CDN 大小探测共用
+# 抖音站内 Referer：yt-dlp 请求与 CDN 大小探测共用
 _DOUYIN_REFERER = "https://www.douyin.com/"
 
 # 短视频取 720P 上限：兼顾清晰度与 30MB 发送限制；
@@ -64,7 +63,6 @@ class DouyinMeta:
     webpage_url: str = ""
     duration: float = 0.0
     estimated_size: int = 0
-    cover: str = ""
     # 浏览器直取的播放直链（download 优先用它直下；为空则走 yt-dlp）
     play_urls: list[str] = field(default_factory=list)
 
@@ -192,7 +190,6 @@ class DouyinParser:
             webpage_url=url,
             duration=info.duration_ms / 1000.0 if info.duration_ms else 0.0,
             estimated_size=info.data_size,
-            cover=info.cover_urls[0] if info.cover_urls else "",
             play_urls=info.play_urls,
         )
 
@@ -259,7 +256,6 @@ class DouyinParser:
             tags=_extract_tags(data, description),
             webpage_url=str(data.get("webpage_url") or url),
             duration=float(data.get("duration") or 0),
-            cover=str(data.get("thumbnail") or ""),
         )
         meta.estimated_size = _estimate_size(data)
         if self._probe_real_size and self._session is not None:
@@ -271,37 +267,6 @@ class DouyinParser:
         if not meta.aweme_id:
             raise ParseError("未能取得视频 ID（可能不是普通视频内容）")
         return meta
-
-    async def download_cover(self, url: str, output_dir: Path,
-                             key: str) -> Path:
-        """下载视频封面到 output_dir/<key>.<ext>，返回本地路径。
-
-        抖音图床要求带 Referer；失败抛 ParseError，由调用方决定降级。
-        """
-        if self._session is None:
-            raise ParseError("无可用 HTTP 会话下载封面")
-        ext = Path(urlparse(url).path).suffix.lower()
-        if ext not in (".jpg", ".jpeg", ".png", ".webp", ".gif"):
-            ext = ".jpg"
-        # key 形如 "douyin:aweme:123..."（含冒号），替换为安全的文件名字符
-        name = re.sub(r"[^A-Za-z0-9_-]", "_", key) or "cover"
-        output_dir.mkdir(parents=True, exist_ok=True)
-        dest = output_dir / f"{name}{ext}"
-        try:
-            async with self._session.get(
-                    url,
-                    headers={"User-Agent": _USER_AGENT,
-                             "Referer": _DOUYIN_REFERER},
-                    timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                if resp.status != 200:
-                    raise ParseError(f"封面下载 HTTP {resp.status}: {url}")
-                data = await resp.read()
-        except (aiohttp.ClientError, TimeoutError) as e:
-            raise ParseError(f"封面下载失败: {e}") from e
-        if not data:
-            raise ParseError("封面内容为空")
-        dest.write_bytes(data)
-        return dest
 
     async def download(self, url: str, output_dir: Path,
                        timeout: int, meta: DouyinMeta | None = None) -> Path:

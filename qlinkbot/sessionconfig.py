@@ -29,8 +29,13 @@ class BiliOptions:
 
 @dataclass
 class DouyinOptions:
-    """douyin 解析在单个会话内的输出开关，默认开启；暂仅总开关。"""
+    """douyin 解析在单个会话内的输出开关，默认全部开启。"""
     enabled: bool = True   # 会话内 douyin 解析总开关（关闭则完全禁用）
+    title: bool = True     # 发送标题（含"作者：xxx"一行）
+    stats: bool = True     # 视频数据（点赞/评论/转发）
+    link: bool = True      # 发送原视频链接
+    intro: bool = True     # 发送简介（含"标签：#xx"一行）
+    video: bool = True     # 发送视频文件
 
 
 # 平台 -> 该平台的会话配置 dataclass；新增平台时在此注册即可

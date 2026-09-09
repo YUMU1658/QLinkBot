@@ -76,7 +76,7 @@ class DouyinReplyTest(unittest.TestCase):
     def _meta(self) -> DouyinMeta:
         return DouyinMeta(
             aweme_id="123",
-            title="#一起看海 出现在你的夏日里",
+            title="海边的夏天",
             author="杨超越",
             plays=12345678,
             likes=345678,
@@ -88,36 +88,82 @@ class DouyinReplyTest(unittest.TestCase):
         )
 
     def test_full_reply(self):
-        text = build_douyin_text_reply(self._meta())
-        self.assertIn("#一起看海 出现在你的夏日里", text)
+        text = build_douyin_text_reply(self._meta(), DouyinOptions())
+        self.assertIn("海边的夏天", text)
         self.assertIn("作者：杨超越", text)
         self.assertNotIn("播放", text)
         self.assertIn("点赞 34.6万", text)
         self.assertIn("评论 1.2万", text)
         self.assertIn("转发 2345", text)
+        self.assertIn("#一起看海 出现在你的夏日里", text)
         self.assertIn("标签：#一起看海", text)
         self.assertIn("原视频：https://www.douyin.com/video/123", text)
+
+    def test_no_opts_equals_all_on(self):
+        self.assertEqual(build_douyin_text_reply(self._meta()),
+                         build_douyin_text_reply(self._meta(),
+                                                 DouyinOptions()))
+
+    def test_title_off_hides_title_and_author(self):
+        text = build_douyin_text_reply(self._meta(), DouyinOptions(title=False))
+        self.assertNotIn("海边的夏天", text)
+        self.assertNotIn("作者：", text)
+        self.assertIn("点赞 34.6万", text)
+        self.assertIn("标签：#一起看海", text)
+        self.assertIn("原视频：", text)
+
+    def test_stats_off_hides_stats_line(self):
+        text = build_douyin_text_reply(self._meta(), DouyinOptions(stats=False))
+        self.assertNotIn("点赞", text)
+        self.assertNotIn("评论", text)
+        self.assertNotIn("转发", text)
+        self.assertIn("作者：杨超越", text)
+        self.assertIn("标签：#一起看海", text)
+
+    def test_intro_off_hides_desc_and_tags(self):
+        text = build_douyin_text_reply(self._meta(), DouyinOptions(intro=False))
+        self.assertNotIn("#一起看海 出现在你的夏日里", text)
+        self.assertNotIn("标签：", text)
+        self.assertIn("作者：杨超越", text)
+        self.assertIn("原视频：", text)
+
+    def test_link_off_hides_original_link(self):
+        text = build_douyin_text_reply(self._meta(), DouyinOptions(link=False))
+        self.assertNotIn("原视频：", text)
+        self.assertIn("作者：杨超越", text)
+        self.assertIn("标签：#一起看海", text)
+
+    def test_all_text_off_returns_empty(self):
+        opts = DouyinOptions(title=False, stats=False, link=False, intro=False)
+        self.assertEqual(build_douyin_text_reply(self._meta(), opts), "")
 
     def test_no_tags_line_omitted(self):
         meta = self._meta()
         meta.tags = []
-        self.assertNotIn("标签：", build_douyin_text_reply(meta))
+        self.assertNotIn("标签：",
+                         build_douyin_text_reply(meta, DouyinOptions()))
 
     def test_empty_description_placeholder(self):
         meta = self._meta()
         meta.description = ""
-        self.assertIn("（无简介）", build_douyin_text_reply(meta))
+        self.assertIn("（无简介）",
+                      build_douyin_text_reply(meta, DouyinOptions()))
 
 
 class DouyinOptionsTest(unittest.TestCase):
-    def test_default_enabled(self):
+    def test_defaults_all_on(self):
         store = SessionConfigStore("")
-        self.assertTrue(store.get("group:X", PLATFORM_DOUYIN).enabled)
+        opts = store.get("group:X", PLATFORM_DOUYIN)
+        for key in ("enabled", "title", "stats", "link", "intro", "video"):
+            self.assertTrue(getattr(opts, key), key)
 
     def test_toggle_and_isolation(self):
         store = SessionConfigStore("")
-        store.update("group:X", PLATFORM_DOUYIN, enabled=False)
-        self.assertFalse(store.get("group:X", PLATFORM_DOUYIN).enabled)
+        store.update("group:X", PLATFORM_DOUYIN, enabled=False, video=False)
+        opts = store.get("group:X", PLATFORM_DOUYIN)
+        self.assertFalse(opts.enabled)
+        self.assertFalse(opts.video)
+        self.assertTrue(opts.title)
         # B 站开关不受影响
         self.assertTrue(store.get("group:X", PLATFORM_BILIBILI).enabled)
 
@@ -128,11 +174,14 @@ class DouyinOptionsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "s.json"
             path.write_text(json.dumps(
-                {"group:X": {"douyin": {"enabled": False}}}), "utf-8")
+                {"group:X": {"douyin": {"enabled": False, "intro": False}}}),
+                "utf-8")
             store = SessionConfigStore(path)
-            self.assertFalse(store.get("group:X", PLATFORM_DOUYIN).enabled)
-            self.assertIsInstance(store.get("group:X", PLATFORM_DOUYIN),
-                                  DouyinOptions)
+            opts = store.get("group:X", PLATFORM_DOUYIN)
+            self.assertFalse(opts.enabled)
+            self.assertFalse(opts.intro)
+            self.assertTrue(opts.title)  # 未持久化的字段取默认值
+            self.assertIsInstance(opts, DouyinOptions)
 
 
 if __name__ == "__main__":

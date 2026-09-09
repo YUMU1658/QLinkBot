@@ -38,8 +38,8 @@ TOGGLE_BUTTON_LABELS = {
 }
 # 设置卡片中可翻转的开关及排列顺序
 TOGGLE_ORDER = ("enabled", "cover", "title", "intro", "stats", "link", "video")
-# 抖音设置卡片中可翻转的开关（暂仅总开关）
-DOUYIN_TOGGLE_ORDER = ("enabled",)
+# 抖音设置卡片中可翻转的开关及排列顺序（抖音不发封面，无 cover 开关）
+DOUYIN_TOGGLE_ORDER = ("enabled", "title", "stats", "link", "intro", "video")
 
 PANEL_DESC = "解析功能管理"
 
@@ -97,6 +97,11 @@ def _bili_settings_card(opts: BiliOptions,
 
 DOUYIN_TOGGLE_BUTTON_LABELS = {
     "enabled": "抖音解析",
+    "title": "发送标题",
+    "stats": "视频数据",
+    "link": "原视频链接",
+    "intro": "发送简介",
+    "video": "发送视频",
 }
 
 
@@ -112,6 +117,9 @@ def _douyin_settings_card(opts: DouyinOptions,
 
     rows = [
         {"buttons": [toggle("enabled")]},
+        {"buttons": [toggle("title"), toggle("stats")]},
+        {"buttons": [toggle("link"), toggle("intro")]},
+        {"buttons": [toggle("video")]},
         {"buttons": [_button("↩ 返回主菜单", DATA_MENU, admin_only)]},
     ]
     return text, {"content": {"rows": rows}}
