@@ -12,6 +12,7 @@ log = logging.getLogger(__name__)
 
 # 平台标识：存储文件中 session_key 下的第一层键，各平台配置互不影响
 PLATFORM_BILIBILI = "bilibili"
+PLATFORM_DOUYIN = "douyin"
 
 
 @dataclass
@@ -26,8 +27,17 @@ class BiliOptions:
     video: bool = True     # 发送视频文件
 
 
+@dataclass
+class DouyinOptions:
+    """douyin 解析在单个会话内的输出开关，默认开启；暂仅总开关。"""
+    enabled: bool = True   # 会话内 douyin 解析总开关（关闭则完全禁用）
+
+
 # 平台 -> 该平台的会话配置 dataclass；新增平台时在此注册即可
-_OPTIONS_TYPES: dict[str, type] = {PLATFORM_BILIBILI: BiliOptions}
+_OPTIONS_TYPES: dict[str, type] = {
+    PLATFORM_BILIBILI: BiliOptions,
+    PLATFORM_DOUYIN: DouyinOptions,
+}
 
 
 class SessionConfigStore:

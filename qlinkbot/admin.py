@@ -9,7 +9,13 @@ from .api import QQApi, QQApiError
 from .config import Config
 from .events import InboundMessage, InteractionEvent
 from .sender import Sender
-from .sessionconfig import BiliOptions, PLATFORM_BILIBILI, SessionConfigStore
+from .sessionconfig import (
+    BiliOptions,
+    DouyinOptions,
+    PLATFORM_BILIBILI,
+    PLATFORM_DOUYIN,
+    SessionConfigStore,
+)
 
 log = logging.getLogger(__name__)
 
@@ -17,6 +23,8 @@ log = logging.getLogger(__name__)
 DATA_MENU = "admin:menu"
 DATA_BILI_SETTINGS = "admin:bili"
 DATA_BILI_TOGGLE = "admin:bilitoggle:"
+DATA_DOUYIN_SETTINGS = "admin:douyin"
+DATA_DOUYIN_TOGGLE = "admin:douyintoggle:"
 
 # 按钮文字（label 平台限制 10 字符内）
 TOGGLE_BUTTON_LABELS = {
@@ -30,6 +38,8 @@ TOGGLE_BUTTON_LABELS = {
 }
 # 设置卡片中可翻转的开关及排列顺序
 TOGGLE_ORDER = ("enabled", "cover", "title", "intro", "stats", "link", "video")
+# 抖音设置卡片中可翻转的开关（暂仅总开关）
+DOUYIN_TOGGLE_ORDER = ("enabled",)
 
 PANEL_DESC = "解析功能管理"
 
@@ -59,6 +69,8 @@ def _menu_card(at_openid: str | None,
     text = (_at_prefix(at_openid)
             + "## 解析管理\n请选择要管理的解析平台：")
     buttons = [_button("bilibili 解析设置", DATA_BILI_SETTINGS, admin_only,
+                       style=3),
+               _button("douyin 解析设置", DATA_DOUYIN_SETTINGS, admin_only,
                        style=3)]
     return text, {"content": {"rows": [{"buttons": buttons}]}}
 
@@ -78,6 +90,28 @@ def _bili_settings_card(opts: BiliOptions,
         {"buttons": [toggle("cover"), toggle("title")]},
         {"buttons": [toggle("intro"), toggle("stats")]},
         {"buttons": [toggle("link"), toggle("video")]},
+        {"buttons": [_button("↩ 返回主菜单", DATA_MENU, admin_only)]},
+    ]
+    return text, {"content": {"rows": rows}}
+
+
+DOUYIN_TOGGLE_BUTTON_LABELS = {
+    "enabled": "抖音解析",
+}
+
+
+def _douyin_settings_card(opts: DouyinOptions,
+                          admin_only: bool) -> tuple[str, dict]:
+    text = "## douyin 解析设置\n点击按钮切换对应开关："
+
+    def toggle(key: str) -> dict:
+        on = getattr(opts, key)
+        label = ("✅ " if on else "⛔ ") + DOUYIN_TOGGLE_BUTTON_LABELS[key]
+        return _button(label, DATA_DOUYIN_TOGGLE + key, admin_only,
+                       style=3 if on else 0)
+
+    rows = [
+        {"buttons": [toggle("enabled")]},
         {"buttons": [_button("↩ 返回主菜单", DATA_MENU, admin_only)]},
     ]
     return text, {"content": {"rows": rows}}
@@ -147,8 +181,11 @@ class AdminService:
 
     async def handle_interaction(self, ev: InteractionEvent) -> None:
         data = ev.button_data.strip()
-        is_toggle = data.startswith(DATA_BILI_TOGGLE)
-        if data not in (DATA_MENU, DATA_BILI_SETTINGS) and not is_toggle:
+        is_bili_toggle = data.startswith(DATA_BILI_TOGGLE)
+        is_douyin_toggle = data.startswith(DATA_DOUYIN_TOGGLE)
+        if data not in (DATA_MENU, DATA_BILI_SETTINGS,
+                        DATA_DOUYIN_SETTINGS) and not is_bili_toggle \
+                and not is_douyin_toggle:
             log.info("未知的按钮回调数据，忽略: %r", data)
             await self._ack(ev, 0)
             return
@@ -163,7 +200,7 @@ class AdminService:
                     ev, 5 if self._cfg.behavior.report_errors else 0)
                 return
 
-        if is_toggle:
+        if is_bili_toggle:
             key = data[len(DATA_BILI_TOGGLE):]
             if key not in TOGGLE_ORDER:
                 await self._ack(ev, 0)
@@ -175,10 +212,26 @@ class AdminService:
                      ev.session_key, key, getattr(opts, key))
             content, keyboard = _bili_settings_card(opts,
                                                     admin_only=ev.is_group)
+        elif is_douyin_toggle:
+            key = data[len(DATA_DOUYIN_TOGGLE):]
+            if key not in DOUYIN_TOGGLE_ORDER:
+                await self._ack(ev, 0)
+                return
+            current = self._store.get(ev.session_key, PLATFORM_DOUYIN)
+            opts = self._store.update(ev.session_key, PLATFORM_DOUYIN,
+                                      **{key: not getattr(current, key)})
+            log.info("[%s] douyin.%s -> %s",
+                     ev.session_key, key, getattr(opts, key))
+            content, keyboard = _douyin_settings_card(opts,
+                                                      admin_only=ev.is_group)
         elif data == DATA_BILI_SETTINGS:
             opts = self._store.get(ev.session_key, PLATFORM_BILIBILI)
             content, keyboard = _bili_settings_card(opts,
                                                     admin_only=ev.is_group)
+        elif data == DATA_DOUYIN_SETTINGS:
+            opts = self._store.get(ev.session_key, PLATFORM_DOUYIN)
+            content, keyboard = _douyin_settings_card(opts,
+                                                      admin_only=ev.is_group)
         else:
             content, keyboard = _menu_card(
                 ev.clicker_openid if ev.is_group else None,

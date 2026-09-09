@@ -1,11 +1,12 @@
 # QLinkBot
 
-基于 QQ 官方机器人 API v2 的简易视频链接解析机器人，当前支持 Bilibili 视频解析（360P）。
+基于 QQ 官方机器人 API v2 的简易视频链接解析机器人，当前支持 Bilibili 视频解析（360P）与抖音视频解析（720P）。
 
 ## 功能
 
 - WebSocket 事件接入（私聊 / 群@ / 群全量消息）
-- 支持 BV 号、AV 号、b23.tv 短链接、完整视频链接
+- B 站：支持 BV 号、AV 号、b23.tv 短链接、完整视频链接
+- 抖音：支持完整视频链接（douyin.com/video/<数字ID>）、v.douyin.com 短链接；图集（note）、直播等非视频内容不解析
 - 每条消息仅解析第一个目标；不支持直播、番剧等非视频内容
 - 解析结果以纯文字信息 + 封面图片文件 + 视频文件被动回复原消息（群内 @机器人 的消息会先 @ 提问者，全量消息与私聊不带 @）
 - 文件大小限制、解析超时、结果缓存、重复视频限速、全局限流均可配置
@@ -17,6 +18,7 @@
 
 - 群聊仅群管理员/群主可触发指令与卡片按钮；私聊不受限制。`behavior.report_errors = false` 时，非管理员触发指令或按钮机器人完全不响应
 - 菜单内「bilibili 解析设置」可开关：启用解析、发送封面、发送标题（含 UP 主）、发送简介、发送视频数据、发送原视频链接、发送视频
+- 菜单内「douyin 解析设置」可开关：启用解析（抖音暂仅总开关）
 - 配置按会话隔离（群聊按 group_openid、私聊按 user_openid），默认全部开启，改动即持久化到 `admin.session_store_path` 指向的 JSON 文件，重启保留
 - 关闭某项后解析结果不再包含对应内容；若封面/标题/简介/视频数据/原链接全部关闭，则解析成功只发送一条视频消息
 - 启动时会通过 QQ「指令面板」接口注册 `/管理` 指令（`admin.register_panel` 可关闭）
@@ -55,8 +57,24 @@ docker compose logs -f               # 查看运行日志
 | `behavior.report_errors` | false | 解析失败/超时/重复时是否回复错误提示；同时控制非管理员触发 `/管理` 时的提示 |
 | `behavior.media_with_text` | true | 尝试封面+文字同条发送；平台不支持时自动拆为两条 |
 | `platforms.bilibili.enabled` | true | Bilibili 平台开关 |
+| `platforms.douyin.enabled` | true | Douyin 平台开关 |
+| `platforms.douyin.cookies_file` | "data/douyin_cookies.txt" | 抖音匿名 cookies 文件（Netscape 格式）；yt-dlp 兜底链路使用，留空则不使用 |
+| `platforms.douyin.browser_enabled` | true | 抖音浏览器直取主链路开关；关闭则回落纯 yt-dlp（大概率被风控拒绝） |
+| `platforms.douyin.browser_proxy` | "" | 浏览器专用代理（如 http://127.0.0.1:7897），留空直连；仅影响浏览器请求 |
 | `admin.command` | "/管理" | 管理指令触发词，同时用于指令面板注册 |
 | `admin.register_panel` | true | 启动时通过 QQ 指令面板接口注册该指令 |
 | `admin.session_store_path` | "data/session_settings.json" | 会话级解析开关持久化文件；留空仅存内存 |
 
 > 注意：QQ 富媒体接口对视频有约 30MB 的软限制，`max_file_size_mb` 设置过高可能导致上游报错。
+
+## 抖音解析说明
+
+抖音视频详情接口有 Argus 请求指纹风控，纯 HTTP 请求（即使带浏览器 cookies）会被 403 拒绝。
+机器人默认走浏览器直取主链路：经无头 Chromium 打开视频页，拦截页面自身的 detail 响应
+（元数据 + 播放直链），再直接下载视频文件。Docker 镜像构建时已内置 Chromium（`playwright install --with-deps chromium`），无需额外操作。
+
+- `platforms.douyin.browser_enabled = true`（默认）启用主链路；若环境无法运行浏览器可关闭，
+  回落纯 yt-dlp（大概率报 `Fresh cookies` 被拒）
+- `platforms.douyin.browser_proxy`：浏览器专用代理，服务器直连抖音有问题时填写；仅影响浏览器请求
+- `platforms.douyin.cookies_file`：yt-dlp 兜底链路使用的 cookies 文件；主链路不需要它。
+  兜底触发时命中 cookies 失效会尝试自动刷新（浏览器优先，失败回落 HTTP 预热），仍被拒时按日志指引手动导出覆盖

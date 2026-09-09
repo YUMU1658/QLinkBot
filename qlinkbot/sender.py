@@ -11,6 +11,7 @@ import aiohttp
 
 from .api import QQApi, QQApiError
 from .bilibili import VideoMeta
+from .douyin import DouyinMeta
 from .events import InboundMessage
 from .sessionconfig import BiliOptions
 
@@ -55,6 +56,26 @@ def build_text_reply(meta: VideoMeta,
         parts.append(_truncate_desc(meta.description))
     if opts.link:
         parts.append(f"原视频：https://www.bilibili.com/video/{meta.bvid}")
+    return "\n\n".join(parts)
+
+
+def build_douyin_text_reply(meta: DouyinMeta) -> str:
+    """组装抖音视频文字回复；结构对标 B 站（标题/数据/简介/标签/原链）。
+
+    注：PC 端 detail 接口不返回播放量（恒为 0），数据行仅保留
+    点赞/评论/转发。
+    """
+    parts: list[str] = []
+    if meta.title or meta.author:
+        parts.append(f"{meta.title}\n作者：{meta.author}")
+    parts.append(
+        f"点赞 {_fmt_count(meta.likes)}　评论 {_fmt_count(meta.comments)}"
+        f"　转发 {_fmt_count(meta.shares)}")
+    parts.append(_truncate_desc(meta.description))
+    if meta.tags:
+        parts.append("标签：" + " ".join(f"#{t}" for t in meta.tags))
+    if meta.webpage_url:
+        parts.append(f"原视频：{meta.webpage_url}")
     return "\n\n".join(parts)
 
 

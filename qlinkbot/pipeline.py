@@ -11,13 +11,20 @@ import aiohttp
 
 from .admin import AdminService
 from .api import QQApi, QQApiError
-from .bilibili import BilibiliParser, ParseError, ParseTimeout, TooLargeError
+from .bilibili import BilibiliParser
 from .caches import DuplicateLimiter, FileCache, MetadataCache, MessageDedup, RateLimiter
 from .config import Config
+from .douyin import DouyinParser
+from .douyin_cookies import DouyinCookieStore
 from .events import InboundMessage
-from .extract import extract_target, normalize_target
-from .sender import Sender, build_text_reply
-from .sessionconfig import BiliOptions, PLATFORM_BILIBILI, SessionConfigStore
+from .extract import Target, extract_target, normalize_target
+from .sender import Sender, build_douyin_text_reply, build_text_reply
+from .sessionconfig import (
+    PLATFORM_BILIBILI,
+    PLATFORM_DOUYIN,
+    SessionConfigStore,
+)
+from .ytdlp_common import ParseError, ParseTimeout, TooLargeError
 
 log = logging.getLogger(__name__)
 
@@ -28,9 +35,20 @@ class Pipeline:
         self._cfg = cfg
         self._api = api
         self._sender = Sender(api)
-        self._parser = BilibiliParser(
+        self._bili_parser = BilibiliParser(
             api.session, probe_real_size=cfg.limits.probe_real_size,
             error_retries=cfg.limits.error_retry_count)
+        self._douyin_cookies = DouyinCookieStore(
+            api.session, cfg.platforms.douyin.cookies_file,
+            browser_proxy=cfg.platforms.douyin.browser_proxy)
+        self._douyin_parser = DouyinParser(
+            api.session, probe_real_size=cfg.limits.probe_real_size,
+            error_retries=cfg.limits.error_retry_count,
+            cookie_store=self._douyin_cookies,
+            browser_proxy=cfg.platforms.douyin.browser_proxy,
+            browser_enabled=cfg.platforms.douyin.browser_enabled)
+        # 旧属性名保留为 bilibili 解析器的别名（兼容外部引用）
+        self._parser = self._bili_parser
         self._downloads_dir = downloads_dir
         self.file_cache = FileCache(cfg.cache.file_ttl_seconds)
         # 封面文件缓存与视频文件缓存共用同一 TTL 配置（cache.file_ttl_seconds）
@@ -142,15 +160,21 @@ class Pipeline:
             await self.admin.handle_command(msg)
             return
 
-        # 会话内 bilibili 解析被 /管理 关闭时完全禁用（指令本身不受影响）
-        opts = self.session_options.get(msg.session_key, PLATFORM_BILIBILI)
-        if not opts.enabled:
-            return
-
+        # 会话内对应平台解析被 /管理 关闭时完全禁用（指令本身不受影响）
         raw_target = extract_target(content)
         if raw_target is None:
             return
-        if not self._cfg.platforms.bilibili.enabled:
+        opts = self.session_options.get(msg.session_key,
+                                        raw_target.platform)
+        if not opts.enabled:
+            return
+        if raw_target.platform == PLATFORM_BILIBILI:
+            if not self._cfg.platforms.bilibili.enabled:
+                return
+        elif raw_target.platform == PLATFORM_DOUYIN:
+            if not self._cfg.platforms.douyin.enabled:
+                return
+        else:
             return
 
         target = await normalize_target(self._session, raw_target)
@@ -168,12 +192,12 @@ class Pipeline:
 
         # 已下载文件缓存命中：直接重发，不再解析、不计次
         cached_file = self.file_cache.get(video_key)
-        meta = self._load_meta(video_key)
+        meta = self._load_meta(target.platform, video_key)
         if cached_file is not None and meta is not None:
             log.info("[%s] 命中文件缓存 %s", msg.session_key, video_key)
             try:
-                await self._send_result(msg, meta, cached_file, video_key,
-                                        opts)
+                await self._send_result(msg, target.platform, meta,
+                                        cached_file, video_key, opts)
             except QQApiError as e:
                 log.warning("缓存文件重发失败: %s", e)
                 await self._maybe_report(msg, "failed")
@@ -212,13 +236,14 @@ class Pipeline:
         """匹配管理指令；content 已在 events 层剥离 @机器人 前缀。"""
         return (content or "").strip() == self._cfg.admin.command
 
-    async def _process(self, msg: InboundMessage, target,
-                       video_key: str, opts: BiliOptions) -> None:
+    async def _process(self, msg: InboundMessage, target: Target,
+                       video_key: str, opts) -> None:
         timeout_budget = self._cfg.limits.parse_timeout_seconds
+        parser = self._parser_for(target.platform)
 
-        meta = self._load_meta(video_key)
+        meta = self._load_meta(target.platform, video_key)
         if meta is None:
-            meta = await self._parser.probe(target.resolve_url, timeout_budget)
+            meta = await parser.probe(target.resolve_url, timeout_budget)
             self.meta_cache.put(video_key, meta.to_cache())
 
         # 大小预检
@@ -226,8 +251,9 @@ class Pipeline:
             raise TooLargeError(
                 f"预计 {meta.estimated_size / 1024 / 1024:.1f}MB 超过限制")
 
-        file_path = await self._parser.download(
-            target.resolve_url, self._downloads_dir, timeout_budget)
+        file_path = await parser.download(
+            target.resolve_url, self._downloads_dir, timeout_budget,
+            **({"meta": meta} if target.platform == PLATFORM_DOUYIN else {}))
 
         actual_size = file_path.stat().st_size
         if actual_size > self._cfg.max_file_size_bytes:
@@ -235,7 +261,8 @@ class Pipeline:
             raise TooLargeError(
                 f"实际 {actual_size / 1024 / 1024:.1f}MB 超过限制")
 
-        await self._send_result(msg, meta, file_path, video_key, opts)
+        await self._send_result(msg, target.platform, meta, file_path,
+                                video_key, opts)
 
         # 全部成功：记录各类缓存与计数
         self.file_cache.put(video_key, file_path)
@@ -243,14 +270,23 @@ class Pipeline:
         log.info("[%s] 解析完成并已发送 %s (%.1fMB)",
                  msg.session_key, video_key, actual_size / 1024 / 1024)
 
-    def _load_meta(self, video_key: str):
+    def _parser_for(self, platform: str):
+        if platform == PLATFORM_DOUYIN:
+            return self._douyin_parser
+        return self._bili_parser
+
+    def _load_meta(self, platform: str, video_key: str):
         data = self.meta_cache.get(video_key)
         if data is None:
             return None
+        if platform == PLATFORM_DOUYIN:
+            from .douyin import DouyinMeta
+            return DouyinMeta.from_cache(data)
         from .bilibili import VideoMeta
         return VideoMeta.from_cache(data)
 
-    async def _ensure_cover(self, meta, video_key: str) -> Path | None:
+    async def _ensure_cover(self, platform: str, meta,
+                            video_key: str) -> Path | None:
         """取封面本地文件；未缓存则下载。失败仅告警，不阻断主流程。"""
         cached = self.cover_cache.get(video_key)
         if cached is not None:
@@ -258,7 +294,7 @@ class Pipeline:
         if not meta.cover:
             return None
         try:
-            path = await self._parser.download_cover(
+            path = await self._parser_for(platform).download_cover(
                 meta.cover, self._covers_dir, video_key)
         except Exception as e:
             log.warning("封面获取失败 %s: %s", video_key, e)
@@ -274,10 +310,18 @@ class Pipeline:
             return f'<qqbot-at-user id="{msg.user_openid}" />\n'
         return ""
 
-    async def _send_result(self, msg: InboundMessage, meta,
+    async def _send_result(self, msg: InboundMessage, platform: str, meta,
                            file_path: Path, video_key: str,
-                           opts: BiliOptions) -> None:
-        text = build_text_reply(meta, opts)
+                           opts) -> None:
+        if platform == PLATFORM_DOUYIN:
+            # 抖音会话配置暂仅总开关：封面与视频默认发送
+            text = build_douyin_text_reply(meta)
+            send_cover = True
+            send_video = True
+        else:
+            text = build_text_reply(meta, opts)
+            send_cover = bool(getattr(opts, "cover", True))
+            send_video = bool(getattr(opts, "video", True))
         prefix = self._at_prefix(msg)
         if prefix:
             text = prefix + text
@@ -289,8 +333,8 @@ class Pipeline:
             return seq_box[0]
 
         # 封面被会话配置关闭时不下载、不发送
-        cover = await self._ensure_cover(meta, video_key) if opts.cover \
-            else None
+        cover = await self._ensure_cover(platform, meta, video_key) \
+            if send_cover else None
 
         combined_done = False
         if cover is not None and text and self._cfg.behavior.media_with_text:
@@ -309,7 +353,7 @@ class Pipeline:
             except QQApiError as e:
                 log.warning("封面发送失败（继续发送视频）: %s", e)
 
-        if opts.video:
+        if send_video:
             await self._sender.send_video(msg, file_path, next_seq())
         else:
             log.info("[%s] 会话配置关闭视频发送，跳过 %s",

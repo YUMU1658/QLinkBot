@@ -1,8 +1,10 @@
-"""从消息文本中提取 Bilibili 视频目标。
+"""从消息文本中提取视频目标（Bilibili / Douyin）。
 
 规则：
 - 一条消息中存在多个结果时，只取文本位置最靠前的第一个；
-- 支持完整视频链接、b23.tv 短链接、BV 号、AV 号；
+- B 站支持完整视频链接、b23.tv 短链接、BV 号、AV 号；
+- 抖音支持完整视频链接（douyin.com/video/<数字ID>）、
+  v.douyin.com 短链接；图集（note）、直播、用户/合集页不识别；
 - 直播、番剧等非视频内容不识别。
 """
 
@@ -14,7 +16,8 @@ from dataclasses import dataclass
 
 import aiohttp
 
-from .bilibili import _USER_AGENT
+from .sessionconfig import PLATFORM_BILIBILI, PLATFORM_DOUYIN
+from .ytdlp_common import _USER_AGENT
 
 log = logging.getLogger(__name__)
 
@@ -28,7 +31,15 @@ SHORT_LINK_RE = re.compile(r"https?://b23\.tv/[0-9A-Za-z]+", re.IGNORECASE)
 BV_ID_RE = re.compile(rf"\b({_BVID})\b")
 AV_ID_RE = re.compile(r"\bav(\d{1,15})\b", re.IGNORECASE)
 
-# 优先级：链接类 > 裸 BV > 裸 AV
+# 抖音：仅普通视频页；note（图集）、live、user 等页面不识别
+DOUYIN_FULL_LINK_RE = re.compile(
+    r"https?://(?:www\.|m\.)?douyin\.com/video/(\d+)\b",
+    re.IGNORECASE,
+)
+DOUYIN_SHORT_LINK_RE = re.compile(
+    r"https?://v\.douyin\.com/[0-9A-Za-z_-]+", re.IGNORECASE)
+
+# 优先级：链接类 > 裸 BV > 裸 AV（抖音只有链接类）
 _PRIORITY_FULL = 0
 _PRIORITY_SHORT = 1
 _PRIORITY_BV = 2
@@ -40,12 +51,13 @@ _EXPAND_TIMEOUT = 10
 @dataclass(frozen=True)
 class Target:
     """一个待解析的视频目标。"""
-    kind: str          # "bvid" | "aid" | "url"
+    kind: str          # "bvid" | "aid" | "aweme" | "url"
     value: str         # 对应的标识或待展开的短链
+    platform: str = PLATFORM_BILIBILI
 
     @property
     def cache_key(self) -> str:
-        return f"{self.kind}:{self.value.lower()}"
+        return f"{self.platform}:{self.kind}:{self.value.lower()}"
 
     @property
     def resolve_url(self) -> str:
@@ -53,6 +65,8 @@ class Target:
             return f"https://www.bilibili.com/video/{self.value}/"
         if self.kind == "aid":
             return f"https://www.bilibili.com/video/{self.value}/"
+        if self.kind == "aweme":
+            return f"https://www.douyin.com/video/{self.value}"
         return self.value
 
 
@@ -62,21 +76,35 @@ def extract_target(content: str) -> Target | None:
     for m in FULL_LINK_RE.finditer(content):
         ident = m.group(1)
         if ident.lower().startswith("bv"):
-            target = Target("bvid", ident)
+            target = Target("bvid", ident, PLATFORM_BILIBILI)
         else:
-            target = Target("aid", ident.lower())
+            target = Target("aid", ident.lower(), PLATFORM_BILIBILI)
         candidates.append((m.start(), _PRIORITY_FULL, target))
 
     for m in SHORT_LINK_RE.finditer(content):
         candidates.append(
-            (m.start(), _PRIORITY_SHORT, Target("url", m.group(0))))
+            (m.start(), _PRIORITY_SHORT,
+             Target("url", m.group(0), PLATFORM_BILIBILI)))
 
     for m in BV_ID_RE.finditer(content):
-        candidates.append((m.start(), _PRIORITY_BV, Target("bvid", m.group(1))))
+        candidates.append((m.start(), _PRIORITY_BV,
+                           Target("bvid", m.group(1), PLATFORM_BILIBILI)))
 
     for m in AV_ID_RE.finditer(content):
         # 与链接内 av 号位置重叠时，按优先级排序后自然由链接候选胜出
-        candidates.append((m.start(), _PRIORITY_AV, Target("aid", f"av{m.group(1)}")))
+        candidates.append((m.start(), _PRIORITY_AV,
+                           Target("aid", f"av{m.group(1)}",
+                                  PLATFORM_BILIBILI)))
+
+    for m in DOUYIN_FULL_LINK_RE.finditer(content):
+        candidates.append(
+            (m.start(), _PRIORITY_FULL,
+             Target("aweme", m.group(1), PLATFORM_DOUYIN)))
+
+    for m in DOUYIN_SHORT_LINK_RE.finditer(content):
+        candidates.append(
+            (m.start(), _PRIORITY_SHORT,
+             Target("url", m.group(0), PLATFORM_DOUYIN)))
 
     if not candidates:
         return None
@@ -86,7 +114,7 @@ def extract_target(content: str) -> Target | None:
 
 async def expand_short_link(session: aiohttp.ClientSession,
                             url: str) -> str | None:
-    """展开 b23.tv 短链，返回最终 URL。
+    """展开 b23.tv / v.douyin.com 短链，返回最终 URL。
 
     Location 头可能是相对路径（如 /video/BVxxx/?...），手动逐跳拼接会
     丢域名；交给 aiohttp 自动跟随重定向，resp.url 即绝对化的最终地址。
@@ -106,19 +134,23 @@ async def expand_short_link(session: aiohttp.ClientSession,
 
 async def normalize_target(session: aiohttp.ClientSession,
                            target: Target) -> Target | None:
-    """把短链展开并归一化为 bvid/aid；非视频页面返回 None。"""
+    """把短链展开并归一化为 bvid/aid/aweme；非视频页面返回 None。"""
     resolved = target
     if target.kind == "url":
         final_url = await expand_short_link(session, target.value)
         if final_url is None:
             return None
         m = FULL_LINK_RE.search(final_url)
-        if not m:
-            log.info("短链 %s 指向非视频页面: %s", target.value, final_url)
-            return None
-        ident = m.group(1)
-        resolved = (Target("bvid", ident)
-                    if ident.lower().startswith("bv") else Target("aid", ident.lower()))
+        if m:
+            ident = m.group(1)
+            return (Target("bvid", ident, PLATFORM_BILIBILI)
+                    if ident.lower().startswith("bv")
+                    else Target("aid", ident.lower(), PLATFORM_BILIBILI))
+        dm = DOUYIN_FULL_LINK_RE.search(final_url)
+        if dm:
+            return Target("aweme", dm.group(1), PLATFORM_DOUYIN)
+        log.info("短链 %s 指向非视频页面: %s", target.value, final_url)
+        return None
     elif target.kind == "aid":
         pass
     return resolved

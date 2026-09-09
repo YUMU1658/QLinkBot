@@ -23,6 +23,13 @@ media_with_text = true    # 尝试封面+文字同条发送；平台不支持时
 [platforms.bilibili]
 enabled = true
 
+[platforms.douyin]
+enabled = true
+cookies_file = "data/douyin_cookies.txt"
+browser_enabled = true  # 抖音浏览器直取主链路开关；关闭则回落纯 yt-dlp
+browser_proxy = ""  # 浏览器代理（如 http://127.0.0.1:7897），留空直连
+  # 抖音匿名 cookies 文件（Netscape 格式）；失效时自动刷新，刷不出时可手动导出覆盖
+
 [admin]
 command = "/管理"                  # 管理指令触发词，同时用于指令面板注册
 register_panel = true              # 启动时通过 QQ 指令面板接口注册该指令

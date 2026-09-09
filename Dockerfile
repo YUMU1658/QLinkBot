@@ -7,7 +7,9 @@ RUN apt-get update \
 WORKDIR /app
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt \
+    # 抖音浏览器直取所需的 Chromium（含系统依赖）
+    && python -m playwright install --with-deps chromium
 
 COPY qlinkbot ./qlinkbot
 

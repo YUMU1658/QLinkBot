@@ -55,8 +55,25 @@ class BilibiliPlatformConfig:
 
 
 @dataclass
+class DouyinPlatformConfig:
+    enabled: bool = True
+    # 抖音匿名 cookies 文件（Netscape 格式）：yt-dlp 解析时经 --cookies 带上，
+    # 用于通过 aweme/detail 接口的匿名风控；程序会在失效时尝试自动刷新，
+    # 刷新失败时可手动用浏览器导出覆盖。留空则不使用 cookies 文件
+    cookies_file: str = "data/douyin_cookies.txt"
+    # 浏览器直取开关：经无头 Chromium 打开视频页拦截 detail 响应
+    # （元数据 + 播放直链）。抖音 Argus 风控下纯 HTTP 必被 403，
+    # 此为主链路；关闭则回落纯 yt-dlp（大概率报 Fresh cookies）
+    browser_enabled: bool = True
+    # 浏览器使用的代理（服务器直连抖音有问题时填，如 http://127.0.0.1:7897）；
+    # 留空则直连。仅影响浏览器请求，不影响 yt-dlp/aiohttp
+    browser_proxy: str = ""
+
+
+@dataclass
 class PlatformsConfig:
     bilibili: BilibiliPlatformConfig = field(default_factory=BilibiliPlatformConfig)
+    douyin: DouyinPlatformConfig = field(default_factory=DouyinPlatformConfig)
 
 
 @dataclass
@@ -115,6 +132,15 @@ def load_config(path: str | Path) -> Config:
     bili = platforms.get("bilibili", {})
     if "enabled" in bili:
         cfg.platforms.bilibili.enabled = bool(bili["enabled"])
+    douyin = platforms.get("douyin", {})
+    if "enabled" in douyin:
+        cfg.platforms.douyin.enabled = bool(douyin["enabled"])
+    if "cookies_file" in douyin:
+        cfg.platforms.douyin.cookies_file = str(douyin["cookies_file"])
+    if "browser_enabled" in douyin:
+        cfg.platforms.douyin.browser_enabled = bool(douyin["browser_enabled"])
+    if "browser_proxy" in douyin:
+        cfg.platforms.douyin.browser_proxy = str(douyin["browser_proxy"])
     admin = raw.get("admin", {})
     if "command" in admin:
         cfg.admin.command = str(admin["command"])
