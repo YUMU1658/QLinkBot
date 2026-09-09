@@ -1,8 +1,11 @@
-"""douyin 测试：链接提取、文案组装、配置开关。"""
+"""douyin 测试：链接提取、文案组装、配置开关、直链下载大小限制。"""
 
+import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
-from qlinkbot.douyin import DouyinMeta, _extract_tags
+from qlinkbot.douyin import DouyinMeta, DouyinParser, _extract_tags
 from qlinkbot.extract import Target, extract_target
 from qlinkbot.sender import build_douyin_text_reply
 from qlinkbot.sessionconfig import (
@@ -11,6 +14,9 @@ from qlinkbot.sessionconfig import (
     DouyinOptions,
     SessionConfigStore,
 )
+from qlinkbot.ytdlp_common import TooLargeError
+
+_MB = 1 << 20
 
 
 class DouyinExtractTest(unittest.TestCase):
@@ -182,6 +188,179 @@ class DouyinOptionsTest(unittest.TestCase):
             self.assertFalse(opts.intro)
             self.assertTrue(opts.title)  # 未持久化的字段取默认值
             self.assertIsInstance(opts, DouyinOptions)
+
+
+class _FakeStream:
+    def __init__(self, chunks):
+        self._chunks = chunks
+
+    async def iter_chunked(self, n):
+        for chunk in self._chunks:
+            yield chunk
+
+
+class _FakeResponse:
+    def __init__(self, status: int = 200, headers: dict | None = None,
+                 chunks: tuple = ()):
+        self.status = status
+        self.headers = headers or {}
+        self.content = _FakeStream(chunks)
+
+
+class _FakeContext:
+    def __init__(self, outcome):
+        self._outcome = outcome  # _FakeResponse 或 Exception
+
+    async def __aenter__(self):
+        if isinstance(self._outcome, Exception):
+            raise self._outcome
+        return self._outcome
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class _FakeSession:
+    """记录请求 URL 的 aiohttp.ClientSession 桩（url → _FakeResponse）。"""
+
+    def __init__(self, outcomes: dict):
+        self._outcomes = outcomes
+        self.requested: list[str] = []
+
+    def get(self, url, headers=None, timeout=None):
+        self.requested.append(url)
+        return _FakeContext(self._outcomes[url])
+
+
+class DouyinDirectDownloadLimitTest(unittest.IsolatedAsyncioTestCase):
+    """直链下载的大小限制：Content-Length 预检与写入累计拦截。"""
+
+    def _meta(self, urls: list[str]) -> DouyinMeta:
+        return DouyinMeta(aweme_id="123", play_urls=urls)
+
+    async def test_content_length_over_limit_aborts_without_file(self):
+        session = _FakeSession({
+            "https://cdn/1": _FakeResponse(
+                headers={"Content-Length": str(40 * _MB)}),
+        })
+        parser = DouyinParser(session, max_file_size_bytes=30 * _MB)
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(TooLargeError):
+                await parser._download_direct(
+                    self._meta(["https://cdn/1"]), "u", Path(d), 10)
+            self.assertFalse((Path(d) / "123.mp4").exists())
+        # 镜像直链是同一文件，超限即终止，不逐个重试
+        self.assertEqual(session.requested, ["https://cdn/1"])
+
+    async def test_midstream_over_limit_deletes_partial(self):
+        session = _FakeSession({
+            "https://cdn/1": _FakeResponse(chunks=[b"x" * _MB] * 40),
+        })
+        parser = DouyinParser(session, max_file_size_bytes=30 * _MB)
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(TooLargeError):
+                await parser._download_direct(
+                    self._meta(["https://cdn/1"]), "u", Path(d), 10)
+            self.assertFalse((Path(d) / "123.mp4").exists())
+
+    async def test_under_limit_downloads(self):
+        session = _FakeSession({
+            "https://cdn/1": _FakeResponse(
+                headers={"Content-Length": str(_MB)}, chunks=[b"v" * _MB]),
+        })
+        parser = DouyinParser(session, max_file_size_bytes=30 * _MB)
+        with tempfile.TemporaryDirectory() as d:
+            path = await parser._download_direct(
+                self._meta(["https://cdn/1"]), "u", Path(d), 10)
+            self.assertEqual(path, Path(d) / "123.mp4")
+            self.assertEqual(path.stat().st_size, _MB)
+
+    async def test_no_limit_by_default(self):
+        session = _FakeSession({
+            "https://cdn/1": _FakeResponse(chunks=[b"x" * _MB] * 40),
+        })
+        parser = DouyinParser(session)  # max_file_size_bytes 默认 0 不限制
+        with tempfile.TemporaryDirectory() as d:
+            path = await parser._download_direct(
+                self._meta(["https://cdn/1"]), "u", Path(d), 10)
+            self.assertEqual(path.stat().st_size, 40 * _MB)
+
+    async def test_too_large_propagates_without_ytdlp_fallback(self):
+        session = _FakeSession({
+            "https://cdn/1": _FakeResponse(
+                headers={"Content-Length": str(40 * _MB)}),
+        })
+        parser = DouyinParser(session, max_file_size_bytes=30 * _MB)
+        run = mock.AsyncMock()
+        with mock.patch("qlinkbot.douyin._run_ytdlp", run):
+            with tempfile.TemporaryDirectory() as d:
+                with self.assertRaises(TooLargeError):
+                    await parser.download(
+                        "u", Path(d), 10, meta=self._meta(["https://cdn/1"]))
+        run.assert_not_called()
+
+
+class DouyinBrowserProbeSizeTest(unittest.IsolatedAsyncioTestCase):
+    """浏览器直取 detail 缺 data_size 时用直链 Range 探测补齐预检大小。"""
+
+    def _info(self, data_size: int = 0,
+              urls: tuple = ("https://cdn/1",)):
+        from qlinkbot.douyin_browser import BrowserVideoInfo
+        return BrowserVideoInfo(aweme_id="123", play_urls=list(urls),
+                                data_size=data_size)
+
+    async def _probe(self, session, info, probe_real_size: bool = True):
+        parser = DouyinParser(session, probe_real_size=probe_real_size)
+        fetch = mock.AsyncMock(return_value=info)
+        with mock.patch("qlinkbot.douyin_browser.fetch_video_info", fetch):
+            return await parser._probe_via_browser("https://www.douyin.com/video/123")
+
+    async def test_data_size_zero_probed(self):
+        probe = mock.AsyncMock(return_value=12 * _MB)
+        with mock.patch("qlinkbot.douyin._probe_real_size", probe):
+            meta = await self._probe(_FakeSession({}), self._info())
+        self.assertEqual(meta.estimated_size, 12 * _MB)
+        probe.assert_awaited_once()
+        # 探测目标是第一个播放直链（url_list 为同一文件的 CDN 镜像）
+        self.assertEqual(probe.await_args.args[1],
+                         [{"url": "https://cdn/1"}])
+
+    async def test_probe_failure_keeps_zero(self):
+        probe = mock.AsyncMock(return_value=None)
+        with mock.patch("qlinkbot.douyin._probe_real_size", probe):
+            meta = await self._probe(_FakeSession({}), self._info())
+        self.assertEqual(meta.estimated_size, 0)
+
+    async def test_data_size_present_skips_probe(self):
+        probe = mock.AsyncMock()
+        with mock.patch("qlinkbot.douyin._probe_real_size", probe):
+            meta = await self._probe(_FakeSession({}),
+                                     self._info(data_size=7 * _MB))
+        self.assertEqual(meta.estimated_size, 7 * _MB)
+        probe.assert_not_awaited()
+
+    async def test_probe_disabled_by_config(self):
+        probe = mock.AsyncMock()
+        with mock.patch("qlinkbot.douyin._probe_real_size", probe):
+            meta = await self._probe(_FakeSession({}), self._info(),
+                                     probe_real_size=False)
+        self.assertEqual(meta.estimated_size, 0)
+        probe.assert_not_awaited()
+
+    async def test_no_play_urls_skips_probe(self):
+        probe = mock.AsyncMock()
+        with mock.patch("qlinkbot.douyin._probe_real_size", probe):
+            meta = await self._probe(_FakeSession({}),
+                                     self._info(urls=()))
+        self.assertEqual(meta.estimated_size, 0)
+        probe.assert_not_awaited()
+
+    async def test_no_session_skips_probe(self):
+        probe = mock.AsyncMock()
+        with mock.patch("qlinkbot.douyin._probe_real_size", probe):
+            meta = await self._probe(None, self._info())
+        self.assertEqual(meta.estimated_size, 0)
+        probe.assert_not_awaited()
 
 
 if __name__ == "__main__":

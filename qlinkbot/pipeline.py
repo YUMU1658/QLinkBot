@@ -46,7 +46,8 @@ class Pipeline:
             error_retries=cfg.limits.error_retry_count,
             cookie_store=self._douyin_cookies,
             browser_proxy=cfg.platforms.douyin.browser_proxy,
-            browser_enabled=cfg.platforms.douyin.browser_enabled)
+            browser_enabled=cfg.platforms.douyin.browser_enabled,
+            max_file_size_bytes=cfg.max_file_size_bytes)
         # 旧属性名保留为 bilibili 解析器的别名（兼容外部引用）
         self._parser = self._bili_parser
         self._downloads_dir = downloads_dir

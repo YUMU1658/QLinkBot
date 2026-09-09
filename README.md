@@ -46,7 +46,7 @@ docker compose logs -f               # 查看运行日志
 | 配置项 | 默认值 | 说明 |
 |---|---|---|
 | `limits.max_file_size_mb` | 30 | 超过该大小的文件不发送 |
-| `limits.probe_real_size` | true | 下载前向 B 站 CDN 发 Range 请求探测实际文件大小用于预检；失败自动回落为 playurl API filesize 估算 |
+| `limits.probe_real_size` | true | 下载前向 B 站 CDN / 抖音播放直链发 Range 请求探测实际文件大小用于预检；失败自动回落为 filesize 估算 |
 | `limits.parse_timeout_seconds` | 300 | 解析超时时间 |
 | `limits.error_retry_count` | 3 | yt-dlp 解析遇暂时性错误（HTTP 412/429/5xx）时的重试次数，指数退避间隔重试；`0` 不重试 |
 | `cache.file_ttl_seconds` | 600 | 已下载视频与封面图片的缓存时长（共用） |
@@ -78,3 +78,6 @@ docker compose logs -f               # 查看运行日志
 - `platforms.douyin.browser_proxy`：浏览器专用代理，服务器直连抖音有问题时填写；仅影响浏览器请求
 - `platforms.douyin.cookies_file`：yt-dlp 兜底链路使用的 cookies 文件；主链路不需要它。
   兜底触发时命中 cookies 失效会尝试自动刷新（浏览器优先，失败回落 HTTP 预热），仍被拒时按日志指引手动导出覆盖
+- 大小限制对主链路生效：`limits.max_file_size_mb` 超限的文件在下载前（Content-Length
+  校验）或下载中（累计写入字节数）即被拦截，不会发送；detail 响应缺文件大小时
+  会先对播放直链发 Range 请求探测真实大小用于预检（受 `limits.probe_real_size` 控制）

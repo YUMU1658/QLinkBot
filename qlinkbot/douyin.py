@@ -7,6 +7,10 @@
 → aiohttp 直接下载。原因：抖音 detail 接口有 Argus 请求指纹风控，
 纯 HTTP（包括带浏览器 cookies 的 yt-dlp）会被 403，只有浏览器自身
 请求能通过。yt-dlp 保留为浏览器不可用时的兜底。
+
+全局大小限制（limits.max_file_size_mb）在直链下载时前置拦截：
+下载前校验 Content-Length、下载中累计已写字节数，超限即中止并
+清理半成品，不回落 yt-dlp（同一文件下载了也会被拒）。
 """
 
 from __future__ import annotations
@@ -21,6 +25,7 @@ import aiohttp
 
 from .ytdlp_common import (
     ParseError,
+    TooLargeError,
     _USER_AGENT,
     _estimate_size,
     _probe_real_size,
@@ -114,13 +119,16 @@ class DouyinParser:
                  error_retries: int = 3,
                  cookie_store=None,
                  browser_proxy: str = "",
-                 browser_enabled: bool = True) -> None:
+                 browser_enabled: bool = True,
+                 max_file_size_bytes: int = 0) -> None:
         self._session = session
         self._probe_real_size = probe_real_size
         self._error_retries = error_retries
         self._cookie_store = cookie_store
         self._browser_proxy = browser_proxy
         self._browser_enabled = browser_enabled
+        # 直链下载的大小限制；0 表示解析器侧不限制（pipeline 传入全局配置值）
+        self._max_file_size_bytes = max_file_size_bytes
 
     def _base_args(self) -> list[str]:
         args = ["--user-agent", _USER_AGENT,
@@ -177,6 +185,16 @@ class DouyinParser:
             raise ParseError("不支持的抖音内容（仅支持单个视频）")
         description = info.desc[:200]
         title = description.splitlines()[0] if description else ""
+        estimated_size = info.data_size
+        # detail 响应缺 data_size 时用直链 Range 探测补齐预检大小；
+        # url_list 是同一文件的 CDN 镜像，探测第一个即可，失败保持 0
+        if (not estimated_size and self._probe_real_size
+                and self._session is not None and info.play_urls):
+            real = await _probe_real_size(
+                self._session, [{"url": info.play_urls[0]}],
+                referer=_DOUYIN_REFERER)
+            if real:
+                estimated_size = real
         return DouyinMeta(
             aweme_id=info.aweme_id,
             title=title,
@@ -189,18 +207,23 @@ class DouyinParser:
             tags=_extract_tags({}, description),
             webpage_url=url,
             duration=info.duration_ms / 1000.0 if info.duration_ms else 0.0,
-            estimated_size=info.data_size,
+            estimated_size=estimated_size,
             play_urls=info.play_urls,
         )
 
     async def _download_direct(self, meta: DouyinMeta, url: str,
                                output_dir: Path,
                                timeout: int) -> Path | None:
-        """用浏览器直取的播放直链直接下载；失败返回 None 以便走 yt-dlp。"""
+        """用浏览器直取的播放直链直接下载；失败返回 None 以便走 yt-dlp。
+
+        大小超限（Content-Length 预检或写入累计）抛 TooLargeError 终止，
+        不回落 yt-dlp：直链与 yt-dlp 选中的是同一文件，下载了也会被拒。
+        """
         if self._session is None or not meta.play_urls:
             return None
         output_dir.mkdir(parents=True, exist_ok=True)
         dest = output_dir / f"{meta.aweme_id or 'douyin'}.mp4"
+        limit = self._max_file_size_bytes
         last_err: Exception | None = None
         for play_url in meta.play_urls[:3]:
             try:
@@ -213,11 +236,25 @@ class DouyinParser:
                         last_err = ParseError(
                             f"直链下载 HTTP {resp.status}")
                         continue
+                    length = resp.headers.get("Content-Length")
+                    if limit and length and length.isdigit() \
+                            and int(length) > limit:
+                        raise TooLargeError(
+                            f"直链文件 {int(length) / 1048576:.1f}MB 超过限制")
                     with open(dest, "wb") as f:
+                        written = 0
                         async for chunk in resp.content.iter_chunked(1 << 20):
+                            written += len(chunk)
+                            if limit and written > limit:
+                                raise TooLargeError(
+                                    f"直链下载已写入 "
+                                    f"{written / 1048576:.1f}MB 超过限制")
                             f.write(chunk)
                 if dest.is_file() and dest.stat().st_size > 0:
                     return dest
+            except TooLargeError:
+                dest.unlink(missing_ok=True)
+                raise
             except (aiohttp.ClientError, TimeoutError, OSError) as e:
                 last_err = e
                 continue

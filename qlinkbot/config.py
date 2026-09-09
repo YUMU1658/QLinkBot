@@ -24,7 +24,8 @@ class BotConfig:
 @dataclass
 class LimitsConfig:
     max_file_size_mb: int = 30
-    # 下载前向 B 站 CDN 发 Range 请求探测实际文件大小；失败自动回落估算值
+    # 下载前向 B 站 CDN / 抖音播放直链发 Range 请求探测实际文件大小；
+    # 失败自动回落估算值
     probe_real_size: bool = True
     parse_timeout_seconds: int = 300
     # yt-dlp 解析遇到暂时性错误（HTTP 412/429/5xx）时的重试次数；0 表示不重试
