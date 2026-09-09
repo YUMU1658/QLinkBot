@@ -6,6 +6,9 @@ RUN apt-get update \
 
 WORKDIR /app
 
+# Chromium 必须装到公共目录：playwright 默认装进 ~/.cache，root 阶段装的 bot 用户看不到
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt \
     # 抖音浏览器直取所需的 Chromium（含系统依赖）
