@@ -87,6 +87,35 @@ class ParseEventTest(unittest.TestCase):
         self.assertEqual(msg.content, "/管理")
         self.assertEqual(msg.session_key, "c2c:U2")
 
+    def test_group_author_with_member_openid(self):
+        data = {
+            "id": "ROBOT1.0_x",
+            "author": {
+                "id": "ID_123",
+                "member_openid": "MEMBER_456",
+                "member_role": "member",
+            },
+            "group_openid": "G1",
+            "content": "测试",
+        }
+        msg = parse_event("GROUP_AT_MESSAGE_CREATE", data)
+        self.assertIsNotNone(msg)
+        self.assertEqual(msg.user_openid, "MEMBER_456")
+
+    def test_group_author_with_id_only(self):
+        data = {
+            "id": "ROBOT1.0_x",
+            "author": {
+                "id": "ID_123",
+                "member_role": "member",
+            },
+            "group_openid": "G1",
+            "content": "测试",
+        }
+        msg = parse_event("GROUP_AT_MESSAGE_CREATE", data)
+        self.assertIsNotNone(msg)
+        self.assertEqual(msg.user_openid, "ID_123")
+
     def test_unknown_event_type(self):
         self.assertIsNone(parse_event("SOMETHING_ELSE", {}))
 

@@ -61,7 +61,11 @@ def parse_event(event_type: str, data: dict) -> InboundMessage | None:
                           "GROUP_MESSAGE_CREATE"):
         return None
     author = data.get("author") or {}
-    user_openid = author.get("user_openid") or author.get("openid") or ""
+    user_openid = (author.get("user_openid")
+                   or author.get("member_openid")
+                   or author.get("id")
+                   or author.get("openid")
+                   or "")
     group_openid = data.get("group_openid")
     if event_type == "C2C_MESSAGE_CREATE":
         session_key = f"c2c:{user_openid}"

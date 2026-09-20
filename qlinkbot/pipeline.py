@@ -303,14 +303,6 @@ class Pipeline:
         self.cover_cache.put(video_key, path)
         return path
 
-    @staticmethod
-    def _at_prefix(msg: InboundMessage) -> str:
-        """@ 机器人消息（对应平台"仅@/@最近N条"范围）回复需带上 @用户；
-        全量群消息与私聊不加。"""
-        if msg.event_type == "GROUP_AT_MESSAGE_CREATE":
-            return f'<qqbot-at-user id="{msg.user_openid}" />\n'
-        return ""
-
     async def _send_result(self, msg: InboundMessage, platform: str, meta,
                            file_path: Path, video_key: str,
                            opts) -> None:
@@ -323,9 +315,6 @@ class Pipeline:
             text = build_text_reply(meta, opts)
             send_cover = bool(getattr(opts, "cover", True))
             send_video = bool(getattr(opts, "video", True))
-        prefix = self._at_prefix(msg)
-        if text and prefix:
-            text = prefix + text
 
         seq_box = [0]
 
