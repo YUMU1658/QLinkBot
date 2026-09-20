@@ -76,8 +76,10 @@ def _menu_card(at_openid: str | None,
 
 
 def _bili_settings_card(opts: BiliOptions,
-                        admin_only: bool) -> tuple[str, dict]:
-    text = "## bilibili 解析设置\n点击按钮切换对应开关："
+                        admin_only: bool,
+                        at_openid: str | None = None) -> tuple[str, dict]:
+    text = (_at_prefix(at_openid)
+            + "## bilibili 解析设置\n点击按钮切换对应开关：")
 
     def toggle(key: str) -> dict:
         on = getattr(opts, key)
@@ -106,8 +108,10 @@ DOUYIN_TOGGLE_BUTTON_LABELS = {
 
 
 def _douyin_settings_card(opts: DouyinOptions,
-                          admin_only: bool) -> tuple[str, dict]:
-    text = "## douyin 解析设置\n点击按钮切换对应开关："
+                          admin_only: bool,
+                          at_openid: str | None = None) -> tuple[str, dict]:
+    text = (_at_prefix(at_openid)
+            + "## douyin 解析设置\n点击按钮切换对应开关：")
 
     def toggle(key: str) -> dict:
         on = getattr(opts, key)
@@ -164,8 +168,7 @@ class AdminService:
         if msg.is_group and msg.member_role not in ("admin", "owner"):
             await self._deny_command(msg)
             return
-        at = (msg.user_openid
-              if msg.event_type == "GROUP_AT_MESSAGE_CREATE" else None)
+        at = msg.user_openid if msg.is_group else None
         content, keyboard = _menu_card(at, admin_only=msg.is_group)
         try:
             await self._sender.send_markdown(msg, content, keyboard, seq=1)
@@ -177,8 +180,7 @@ class AdminService:
             log.info("[%s] 非管理员尝试使用 %s，已静默忽略",
                      msg.session_key, self._cfg.admin.command)
             return
-        text = (_at_prefix(msg.user_openid)
-                if msg.event_type == "GROUP_AT_MESSAGE_CREATE" else "")
+        text = _at_prefix(msg.user_openid) if msg.is_group else ""
         try:
             await self._sender.reply_text(
                 msg, text + "该指令仅限群管理员/群主使用", seq=1)
@@ -208,6 +210,8 @@ class AdminService:
                     ev, 5 if self._cfg.behavior.report_errors else 0)
                 return
 
+        at_openid = ev.clicker_openid if ev.is_group else None
+
         if is_bili_toggle:
             key = data[len(DATA_BILI_TOGGLE):]
             if key not in TOGGLE_ORDER:
@@ -219,7 +223,8 @@ class AdminService:
             log.info("[%s] bilibili.%s -> %s",
                      ev.session_key, key, getattr(opts, key))
             content, keyboard = _bili_settings_card(opts,
-                                                    admin_only=ev.is_group)
+                                                    admin_only=ev.is_group,
+                                                    at_openid=at_openid)
         elif is_douyin_toggle:
             key = data[len(DATA_DOUYIN_TOGGLE):]
             if key not in DOUYIN_TOGGLE_ORDER:
@@ -231,18 +236,21 @@ class AdminService:
             log.info("[%s] douyin.%s -> %s",
                      ev.session_key, key, getattr(opts, key))
             content, keyboard = _douyin_settings_card(opts,
-                                                      admin_only=ev.is_group)
+                                                      admin_only=ev.is_group,
+                                                      at_openid=at_openid)
         elif data == DATA_BILI_SETTINGS:
             opts = self._store.get(ev.session_key, PLATFORM_BILIBILI)
             content, keyboard = _bili_settings_card(opts,
-                                                    admin_only=ev.is_group)
+                                                    admin_only=ev.is_group,
+                                                    at_openid=at_openid)
         elif data == DATA_DOUYIN_SETTINGS:
             opts = self._store.get(ev.session_key, PLATFORM_DOUYIN)
             content, keyboard = _douyin_settings_card(opts,
-                                                      admin_only=ev.is_group)
+                                                      admin_only=ev.is_group,
+                                                      at_openid=at_openid)
         else:
             content, keyboard = _menu_card(
-                ev.clicker_openid if ev.is_group else None,
+                at_openid,
                 admin_only=ev.is_group)
 
         await self._ack(ev, 0)

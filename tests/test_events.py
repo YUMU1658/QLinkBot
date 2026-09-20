@@ -2,7 +2,7 @@
 
 import unittest
 
-from qlinkbot.events import parse_event, strip_at_prefix
+from qlinkbot.events import parse_event, parse_interaction, strip_at_prefix
 
 
 class StripAtPrefixTest(unittest.TestCase):
@@ -118,6 +118,72 @@ class ParseEventTest(unittest.TestCase):
 
     def test_unknown_event_type(self):
         self.assertIsNone(parse_event("SOMETHING_ELSE", {}))
+
+
+class ParseInteractionTest(unittest.TestCase):
+    def test_group_interaction_with_member_openid(self):
+        data = {
+            "id": "int_1",
+            "type": 11,
+            "group_openid": "G1",
+            "group_member_openid": "M1",
+            "data": {
+                "resolved": {
+                    "button_id": "b1",
+                    "button_data": "admin:bili",
+                }
+            }
+        }
+        ev = parse_interaction("INTERACTION_CREATE", data)
+        self.assertIsNotNone(ev)
+        self.assertTrue(ev.is_group)
+        self.assertEqual(ev.clicker_openid, "M1")
+        self.assertEqual(ev.group_openid, "G1")
+        self.assertEqual(ev.button_data, "admin:bili")
+
+    def test_group_interaction_with_user_openid_fallback(self):
+        data = {
+            "id": "int_2",
+            "type": 11,
+            "chat_type": 1,
+            "group_openid": "G1",
+            "user_openid": "U_FALLBACK",
+            "data": {
+                "resolved": {
+                    "button_id": "b2",
+                    "button_data": "admin:menu",
+                }
+            }
+        }
+        ev = parse_interaction("INTERACTION_CREATE", data)
+        self.assertIsNotNone(ev)
+        self.assertTrue(ev.is_group)
+        self.assertEqual(ev.clicker_openid, "U_FALLBACK")
+
+    def test_c2c_interaction(self):
+        data = {
+            "id": "int_3",
+            "type": 11,
+            "user_openid": "U1",
+            "data": {
+                "resolved": {
+                    "button_id": "b3",
+                    "button_data": "admin:douyin",
+                }
+            }
+        }
+        ev = parse_interaction("INTERACTION_CREATE", data)
+        self.assertIsNotNone(ev)
+        self.assertFalse(ev.is_group)
+        self.assertEqual(ev.clicker_openid, "U1")
+        self.assertIsNone(ev.group_openid)
+
+    def test_ignore_non_button_interaction(self):
+        data = {
+            "id": "int_4",
+            "type": 13,
+        }
+        self.assertIsNone(parse_interaction("INTERACTION_CREATE", data))
 
 
 if __name__ == "__main__":

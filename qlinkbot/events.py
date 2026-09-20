@@ -107,7 +107,8 @@ def parse_interaction(event_type: str, data: dict) -> InteractionEvent | None:
         if not group_openid:
             log.warning("INTERACTION_CREATE 群场景缺少 group_openid: %s", data)
             return None
-        clicker = data.get("group_member_openid") or ""
+        clicker = (data.get("group_member_openid")
+                   or data.get("user_openid") or "")
         session_key = f"group:{group_openid}"
     else:
         if not user_openid:
