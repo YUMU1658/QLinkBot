@@ -1,14 +1,18 @@
 """bilibili 测试：大小预检与 yt-dlp 暂时性错误重试。"""
 
 import asyncio
+import json
 import unittest
 from unittest import mock
 
 import aiohttp
 
 from qlinkbot.bilibili import (
+    BilibiliParser,
     ParseError,
     VideoMeta,
+    _FORMAT_MERGED,
+    _FORMAT_PROGRESSIVE,
     _content_range_total,
     _estimate_size,
     _is_transient_error,
@@ -242,6 +246,43 @@ class ProbeRealSizeTest(unittest.IsolatedAsyncioTestCase):
         session.get = lambda url, headers=None, timeout=None: _HangingContext()
         self.assertIsNone(
             await _probe_real_size(session, [{"url": "https://cdn/v.m4s"}]))
+
+
+class FormatSelectorTest(unittest.TestCase):
+    """清晰度 selector 回归：竖屏 360P 档是 360x640，width/height 都要回退。"""
+
+    def test_merged_covers_both_orientations(self):
+        self.assertIn("bv*[width<=360]+ba", _FORMAT_MERGED)
+        self.assertIn("bv*[height<=360]+ba", _FORMAT_MERGED)
+
+    def test_merged_falls_back_to_480_then_uncapped(self):
+        self.assertIn("width<=480", _FORMAT_MERGED)
+        self.assertIn("height<=480", _FORMAT_MERGED)
+        # 最终兜底必须存在且不带高度限制，避免 DASH 分离流全分支失配
+        self.assertTrue(_FORMAT_MERGED.endswith("/bv*+ba/b"))
+
+    def test_progressive_covers_both_orientations(self):
+        self.assertIn("b[width<=360][ext=mp4]", _FORMAT_PROGRESSIVE)
+        self.assertIn("b[height<=360][ext=mp4]", _FORMAT_PROGRESSIVE)
+        self.assertIn("width<=480", _FORMAT_PROGRESSIVE)
+        self.assertIn("height<=480", _FORMAT_PROGRESSIVE)
+        # 无 ffmpeg 无法合并，兜底只能是 muxed 格式
+        self.assertTrue(_FORMAT_PROGRESSIVE.endswith("/b[ext=mp4]/b"))
+        self.assertNotIn("+ba", _FORMAT_PROGRESSIVE)
+
+
+class ProbeSelectorTest(unittest.IsolatedAsyncioTestCase):
+    async def test_probe_passes_merged_selector(self):
+        info = {"id": "BV1xx", "title": "t", "duration": 10,
+                "format_id": "30016+30216", "formats": []}
+        with mock.patch("qlinkbot.bilibili._run_ytdlp",
+                        new_callable=mock.AsyncMock,
+                        return_value=json.dumps(info)) as run_mock, \
+                mock.patch("qlinkbot.bilibili._has_ffmpeg", return_value=True):
+            parser = BilibiliParser(probe_real_size=False)
+            await parser.probe("https://www.bilibili.com/video/BV1xx", 10)
+        args = run_mock.await_args.args[0]
+        self.assertEqual(args[args.index("-f") + 1], _FORMAT_MERGED)
 
 
 class MetaCacheTest(unittest.TestCase):

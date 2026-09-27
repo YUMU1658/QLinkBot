@@ -28,9 +28,24 @@ from .ytdlp_common import (
 
 log = logging.getLogger(__name__)
 
-# 未登录可获取的最高清晰度即 360P
-_FORMAT_MERGED = "bv*[height<=360]+ba/b[height<=360]/b"
-_FORMAT_PROGRESSIVE = "b[height<=360][ext=mp4]/b[height<=360]/bv*[height<=360]+ba"
+# 主动限制清晰度以压体积（未登录经 try_look 实际可拿 1080P）。
+# 档位须按“短边”限宽：横屏 360P=640x360(height)、竖屏 360P=360x640(width)，
+# 两个维度都要回退；连 360P 档都没有的稿件再回退 480P，最后兜底不限高，
+# 避免 B 站 DASH 分离流上 muxed 格式(b)失配直接报错。
+_FORMAT_MERGED = (
+    "bv*[width<=360]+ba/b[width<=360]"
+    "/bv*[height<=360]+ba/b[height<=360]"
+    "/bv*[width<=480]+ba/b[width<=480]"
+    "/bv*[height<=480]+ba/b[height<=480]"
+    "/bv*+ba/b"
+)
+_FORMAT_PROGRESSIVE = (
+    "b[width<=360][ext=mp4]/b[width<=360]"
+    "/b[height<=360][ext=mp4]/b[height<=360]"
+    "/b[width<=480][ext=mp4]/b[width<=480]"
+    "/b[height<=480][ext=mp4]/b[height<=480]"
+    "/b[ext=mp4]/b"
+)
 
 
 @dataclass
